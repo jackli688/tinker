@@ -16,7 +16,7 @@
 
 package com.tencent.tinker.build.gradle.task
 
-import com.tencent.tinker.build.gradle.TinkerPatchPlugin
+import com.tencent.tinker.build.gradle.TinkerBuildPath
 import com.tencent.tinker.build.util.FileOperation
 import org.gradle.api.DefaultTask
 import org.gradle.api.tasks.TaskAction
@@ -27,7 +27,6 @@ import org.gradle.api.tasks.TaskAction
  * @author zhangshaowen
  */
 public class TinkerProguardConfigTask extends DefaultTask {
-    static final String PROGUARD_CONFIG_PATH =  TinkerPatchPlugin.TINKER_INTERMEDIATES + "tinker_proguard.pro"
     static final String PROGUARD_CONFIG_SETTINGS =
             "-keepattributes *Annotation* \n" +
                     "-dontwarn com.tencent.tinker.anno.AnnotationProcessor \n" +
@@ -35,14 +34,12 @@ public class TinkerProguardConfigTask extends DefaultTask {
                     "-keep public class * extends android.app.Application {\n" +
                     "    *;\n" +
                     "}\n" +
-                    "\n" +
-                    "-keep public class com.tencent.tinker.loader.app.ApplicationLifeCycle {\n" +
+                    "-keep public class com.tencent.tinker.entry.ApplicationLifeCycle {\n" +
                     "    *;\n" +
                     "}\n" +
-                    "-keep public class * implements com.tencent.tinker.loader.app.ApplicationLifeCycle {\n" +
+                    "-keep public class * implements com.tencent.tinker.entry.ApplicationLifeCycle {\n" +
                     "    *;\n" +
                     "}\n" +
-                    "\n" +
                     "-keep public class com.tencent.tinker.loader.TinkerLoader {\n" +
                     "    *;\n" +
                     "}\n" +
@@ -52,10 +49,9 @@ public class TinkerProguardConfigTask extends DefaultTask {
                     "-keep public class com.tencent.tinker.loader.TinkerTestDexLoad {\n" +
                     "    *;\n" +
                     "}\n" +
-                    "-keep public class com.tencent.tinker.loader.TinkerTestAndroidNClassLoader {\n" +
+                    "-keep public class com.tencent.tinker.entry.TinkerApplicationInlineFence {\n" +
                     "    *;\n" +
-                    "}\n" +
-                    "\n"
+                    "}\n"
 
 
     def applicationVariant
@@ -68,7 +64,7 @@ public class TinkerProguardConfigTask extends DefaultTask {
 
     @TaskAction
     def updateTinkerProguardConfig() {
-        def file = project.file(PROGUARD_CONFIG_PATH)
+        def file = project.file(TinkerBuildPath.getProguardConfigPath(project))
         project.logger.error("try update tinker proguard file with ${file}")
 
         // Create the directory if it doesnt exist already

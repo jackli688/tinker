@@ -30,11 +30,12 @@ import com.tencent.tinker.lib.reporter.PatchReporter;
 import com.tencent.tinker.lib.service.AbstractResultService;
 import com.tencent.tinker.lib.service.DefaultTinkerResultService;
 import com.tencent.tinker.lib.service.TinkerPatchService;
-import com.tencent.tinker.lib.util.TinkerLog;
+import com.tencent.tinker.loader.shareutil.ShareTinkerLog;
 import com.tencent.tinker.lib.util.TinkerServiceInternals;
 import com.tencent.tinker.loader.TinkerRuntimeException;
 import com.tencent.tinker.loader.shareutil.ShareConstants;
 import com.tencent.tinker.loader.shareutil.SharePatchFileUtil;
+import com.tencent.tinker.loader.shareutil.SharePatchInfo;
 import com.tencent.tinker.loader.shareutil.ShareTinkerInternals;
 
 import java.io.File;
@@ -102,11 +103,9 @@ public class Tinker {
         if (!sInstalled) {
             throw new TinkerRuntimeException("you must install tinker before get tinker sInstance");
         }
-        if (sInstance == null) {
-            synchronized (Tinker.class) {
-                if (sInstance == null) {
-                    sInstance = new Builder(context).build();
-                }
+        synchronized (Tinker.class) {
+            if (sInstance == null) {
+                sInstance = new Builder(context).build();
             }
         }
         return sInstance;
@@ -141,10 +140,10 @@ public class Tinker {
         sInstalled = true;
         TinkerPatchService.setPatchProcessor(upgradePatch, serviceClass);
 
-        TinkerLog.i(TAG, "try to install tinker, isEnable: %b, version: %s", isTinkerEnabled(), ShareConstants.TINKER_VERSION);
+        ShareTinkerLog.i(TAG, "try to install tinker, isEnable: %b, version: %s", isTinkerEnabled(), ShareConstants.TINKER_VERSION);
 
         if (!isTinkerEnabled()) {
-            TinkerLog.e(TAG, "tinker is disabled");
+            ShareTinkerLog.e(TAG, "tinker is disabled");
             return;
         }
         if (intentResult == null) {
@@ -156,7 +155,7 @@ public class Tinker {
         loadReporter.onLoadResult(patchDirectory, tinkerLoadResult.loadCode, tinkerLoadResult.costTime);
 
         if (!loaded) {
-            TinkerLog.w(TAG, "tinker load fail!");
+            ShareTinkerLog.w(TAG, "tinker load fail!");
         }
     }
 
@@ -260,10 +259,17 @@ public class Tinker {
         if (patchDirectory == null) {
             return;
         }
-        if (isTinkerLoaded()) {
-            TinkerLog.e(TAG, "it is not safety to clean patch when tinker is loaded, you should kill all your process after clean!");
+        final File patchInfoFile = SharePatchFileUtil.getPatchInfoFile(patchDirectory.getAbsolutePath());
+        if (!patchInfoFile.exists()) {
+            ShareTinkerLog.w(TAG, "try to clean patch while patch info file does not exist.");
+            return;
         }
-        SharePatchFileUtil.deleteDir(patchDirectory);
+        final File patchInfoLockFile = SharePatchFileUtil.getPatchInfoLockFile(patchDirectory.getAbsolutePath());
+        final SharePatchInfo patchInfo = SharePatchInfo.readAndCheckPropertyWithLock(patchInfoFile, patchInfoLockFile);
+        if (patchInfo != null) {
+            patchInfo.isRemoveNewVersion = true;
+            SharePatchInfo.rewritePatchInfoFileWithLock(patchInfoFile, patchInfo, patchInfoLockFile);
+        }
     }
 
     /**
@@ -271,7 +277,7 @@ public class Tinker {
      */
     public void rollbackPatch() {
         if (!isTinkerLoaded()) {
-            TinkerLog.w(TAG, "rollbackPatch: tinker is not loaded, just return");
+            ShareTinkerLog.w(TAG, "rollbackPatch: tinker is not loaded, just return");
             return;
         }
         // kill all other process
@@ -310,13 +316,13 @@ public class Tinker {
     /**
      * try delete the temp version files
      *
-     * @param patchFile
+     * @param patchApk
      */
-    public void cleanPatchByVersion(File patchFile) {
-        if (patchDirectory == null || patchFile == null || !patchFile.exists()) {
+    public void cleanPatchByPatchApk(File patchApk) {
+        if (patchDirectory == null || patchApk == null || !patchApk.exists()) {
             return;
         }
-        String versionName = SharePatchFileUtil.getPatchVersionDirectory(SharePatchFileUtil.getMD5(patchFile));
+        String versionName = SharePatchFileUtil.getPatchVersionDirectory(SharePatchFileUtil.getMD5(patchApk));
         cleanPatchByVersion(versionName);
     }
 
@@ -347,12 +353,12 @@ public class Tinker {
             this.patchProcess = TinkerServiceInternals.isInTinkerPatchServiceProcess(context);
             this.patchDirectory = SharePatchFileUtil.getPatchDirectory(context);
             if (this.patchDirectory == null) {
-                TinkerLog.e(TAG, "patchDirectory is null!");
+                ShareTinkerLog.e(TAG, "patchDirectory is null!");
                 return;
             }
             this.patchInfoFile = SharePatchFileUtil.getPatchInfoFile(patchDirectory.getAbsolutePath());
             this.patchInfoLockFile = SharePatchFileUtil.getPatchInfoLockFile(patchDirectory.getAbsolutePath());
-            TinkerLog.w(TAG, "tinker patch directory: %s", patchDirectory);
+            ShareTinkerLog.w(TAG, "tinker patch directory: %s", patchDirectory);
         }
 
         public Builder tinkerFlags(int tinkerFlags) {

@@ -16,7 +16,8 @@
 
 package com.tencent.tinker.lib.patch;
 
-import com.tencent.tinker.lib.util.TinkerLog;
+import com.tencent.tinker.commons.util.IOHelper;
+import com.tencent.tinker.loader.shareutil.ShareTinkerLog;
 import com.tencent.tinker.loader.shareutil.ShareConstants;
 import com.tencent.tinker.loader.shareutil.SharePatchFileUtil;
 
@@ -25,6 +26,8 @@ import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -41,45 +44,53 @@ public class BasePatchInternal {
     protected static final String DEX_META_FILE        = ShareConstants.DEX_META_FILE;
     protected static final String SO_META_FILE         = ShareConstants.SO_META_FILE;
     protected static final String RES_META_FILE        = ShareConstants.RES_META_FILE;
+    protected static final String ARKHOT_META_FILE = ShareConstants.ARKHOT_META_FILE;
 
     protected static final int TYPE_DEX         = ShareConstants.TYPE_DEX;
-    protected static final int TYPE_Library     = ShareConstants.TYPE_LIBRARY;
+    protected static final int TYPE_LIBRARY     = ShareConstants.TYPE_LIBRARY;
     protected static final int TYPE_RESOURCE    = ShareConstants.TYPE_RESOURCE;
+    protected static final int TYPE_CLASS_N_DEX = ShareConstants.TYPE_CLASS_N_DEX;
+    protected static final int TYPE_ARKHOT_SO = ShareConstants.TYPE_ARKHOT_SO;
+
 
     public static boolean extract(ZipFile zipFile, ZipEntry entryFile, File extractTo, String targetMd5, boolean isDex) throws IOException {
         int numAttempts = 0;
         boolean isExtractionSuccessful = false;
         while (numAttempts < MAX_EXTRACT_ATTEMPTS && !isExtractionSuccessful) {
             numAttempts++;
-            BufferedInputStream bis = new BufferedInputStream(zipFile.getInputStream(entryFile));
-            FileOutputStream fos = new FileOutputStream(extractTo);
-            BufferedOutputStream out = new BufferedOutputStream(fos);
+            InputStream is = null;
+            OutputStream os = null;
 
-            TinkerLog.i(TAG, "try Extracting " + extractTo.getPath());
+            ShareTinkerLog.i(TAG, "try Extracting " + extractTo.getPath());
 
             try {
+                is = new BufferedInputStream(zipFile.getInputStream(entryFile));
+                os = new BufferedOutputStream(new FileOutputStream(extractTo));
                 byte[] buffer = new byte[ShareConstants.BUFFER_SIZE];
-                int length = bis.read(buffer);
-                while (length != -1) {
-                    out.write(buffer, 0, length);
-                    length = bis.read(buffer);
+                int length = 0;
+                while ((length = is.read(buffer)) > 0) {
+                    os.write(buffer, 0, length);
                 }
             } finally {
-                SharePatchFileUtil.closeQuietly(out);
-                SharePatchFileUtil.closeQuietly(bis);
+                IOHelper.closeQuietly(os);
+                IOHelper.closeQuietly(is);
             }
-
-            if (isDex) {
-                isExtractionSuccessful = SharePatchFileUtil.verifyDexFileMd5(extractTo, targetMd5);
+            if (targetMd5 != null) {
+                if (isDex) {
+                    isExtractionSuccessful = SharePatchFileUtil.verifyDexFileMd5(extractTo, targetMd5);
+                } else {
+                    isExtractionSuccessful = SharePatchFileUtil.verifyFileMd5(extractTo, targetMd5);
+                }
             } else {
-                isExtractionSuccessful = SharePatchFileUtil.verifyFileMd5(extractTo, targetMd5);
+                // treat it as true
+                isExtractionSuccessful = true;
             }
-            TinkerLog.i(TAG, "isExtractionSuccessful: %b", isExtractionSuccessful);
+            ShareTinkerLog.i(TAG, "isExtractionSuccessful: %b", isExtractionSuccessful);
 
             if (!isExtractionSuccessful) {
-                extractTo.delete();
-                if (extractTo.exists()) {
-                    TinkerLog.e(TAG, "Failed to delete corrupted dex " + extractTo.getPath());
+                final boolean succ = extractTo.delete();
+                if (!succ || extractTo.exists()) {
+                    ShareTinkerLog.e(TAG, "Failed to delete corrupted dex " + extractTo.getPath());
                 }
             }
         }
@@ -90,7 +101,7 @@ public class BasePatchInternal {
     public static int getMetaCorruptedCode(int type) {
         if (type == TYPE_DEX) {
             return ShareConstants.ERROR_PACKAGE_CHECK_DEX_META_CORRUPTED;
-        } else if (type == TYPE_Library) {
+        } else if (type == TYPE_LIBRARY) {
             return ShareConstants.ERROR_PACKAGE_CHECK_LIB_META_CORRUPTED;
         } else if (type == TYPE_RESOURCE) {
             return ShareConstants.ERROR_PACKAGE_CHECK_RESOURCE_META_CORRUPTED;

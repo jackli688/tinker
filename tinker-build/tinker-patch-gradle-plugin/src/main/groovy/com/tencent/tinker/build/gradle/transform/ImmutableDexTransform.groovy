@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2016 THL A29 Limited, a Tencent company. All rights reserved.
  *
- * Licensed under the BSD 3-Clause License (the "License"); you may not use this file except in
+ * Licensed under the BSD 3-Clause License (the "License") you may not use this file except in
  * compliance with the License. You may obtain a copy of the License at
  *
  * https://opensource.org/licenses/BSD-3-Clause
@@ -17,21 +17,14 @@
 package com.tencent.tinker.build.gradle.transform
 
 import com.android.annotations.NonNull
-import com.android.build.api.transform.Format
-import com.android.build.api.transform.JarInput;
-import com.android.build.api.transform.QualifiedContent
-import com.android.build.api.transform.Transform;
-import com.android.build.api.transform.TransformException
-import com.android.build.api.transform.TransformInput
-import com.android.build.api.transform.TransformInvocation
-import com.android.build.api.transform.TransformOutputProvider
+import com.android.build.api.transform.*
+import com.android.build.gradle.internal.pipeline.TransformManager
 import com.android.build.gradle.internal.pipeline.TransformTask
-import com.android.build.gradle.internal.transforms.DexTransform
 import com.google.common.base.Joiner
 import com.google.common.collect.Lists
 import com.tencent.tinker.android.dex.ClassDef
 import com.tencent.tinker.android.dex.Dex
-import com.tencent.tinker.build.gradle.TinkerPatchPlugin
+import com.tencent.tinker.build.gradle.TinkerBuildPath
 import com.tencent.tinker.build.immutable.ClassSimDef
 import com.tencent.tinker.build.immutable.DexRefData
 import com.tencent.tinker.build.util.FileOperation
@@ -42,10 +35,9 @@ import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.execution.TaskExecutionGraph
 import org.gradle.api.execution.TaskExecutionGraphListener
-import org.gradle.api.logging.Logging
 import org.gradle.api.tasks.JavaExec
 
-import java.lang.reflect.Field;
+import java.lang.reflect.Field
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -57,7 +49,7 @@ public class ImmutableDexTransform extends Transform {
 
     public static final String TASK_WORK_DIR = "keep_dex"
 
-    private static final Joiner PATH_JOINER = Joiner.on(File.separatorChar);
+    private static final Joiner PATH_JOINER = Joiner.on(File.separatorChar)
 
     Project project
 
@@ -67,8 +59,6 @@ public class ImmutableDexTransform extends Transform {
 
     File baseDexDir
 
-    File dxOutDir
-
     File mainDexListFile
 
     String varName
@@ -77,38 +67,37 @@ public class ImmutableDexTransform extends Transform {
 
     def variant
 
-    DexTransform dexTransform
+    def dexTransform
 
 
-    ImmutableDexTransform(Project project, def variant, DexTransform dexTransform) {
+    ImmutableDexTransform(Project project, def variant, def dexTransform) {
         this.dexTransform = dexTransform
         this.project = project
         this.variant = variant
         this.varName = variant.name.capitalize()
         this.varDirName = variant.getDirName()
         this.oldApkPath = project.tinkerPatch.oldApk
-        this.mainDexListFile = dexTransform.mainDexListFile
+        if (dexTransform.mainDexListFile instanceof File) {
+            this.mainDexListFile = dexTransform.mainDexListFile
+        } else {
+            this.mainDexListFile = dexTransform.mainDexListFile.getSingleFile()
+        }
     }
 
     public void initFileEnv(TransformOutputProvider outputProvider) {
         classPreDir = getDirInWorkDir("class_pre")
         baseDexDir = getDirInWorkDir("base_dex")
-        dxOutDir = outputProvider.getContentLocation("main",
-                getOutputTypes(), getScopes(),
-                Format.DIRECTORY);
 
         classPreDir.mkdirs()
         baseDexDir.mkdirs()
-        dxOutDir.mkdirs()
 
         FileOperation.cleanDir(classPreDir)
         FileOperation.cleanDir(baseDexDir)
-        FileOperation.cleanDir(dxOutDir)
     }
 
     private File getDirInWorkDir(String name) {
-        return new File(PATH_JOINER.join(project.projectDir,
-                TinkerPatchPlugin.TINKER_INTERMEDIATES,
+        return new File(PATH_JOINER.join(
+                TinkerBuildPath.getTinkerIntermediates(project),
                 TASK_WORK_DIR,
                 name,
                 varDirName)
@@ -119,7 +108,7 @@ public class ImmutableDexTransform extends Transform {
     @NonNull
     @Override
     public Set<QualifiedContent.ContentType> getOutputTypes() {
-        return dexTransform.getOutputTypes();
+        return dexTransform.getOutputTypes()
     }
 
     @NonNull
@@ -137,7 +126,7 @@ public class ImmutableDexTransform extends Transform {
     @NonNull
     @Override
     public Map<String, Object> getParameterInputs() {
-       return dexTransform.getParameterInputs()
+        return dexTransform.getParameterInputs()
     }
 
     @Override
@@ -162,11 +151,10 @@ public class ImmutableDexTransform extends Transform {
 
     @Override
     void transform(TransformInvocation transformInvocation) throws TransformException, IOException, InterruptedException {
-
         // because multi dex is enable,we only process jar file.
-        List<JarInput> jarInputs = Lists.newArrayList();
+        List<JarInput> jarInputs = Lists.newArrayList()
         for (TransformInput input : transformInvocation.getInputs()) {
-            jarInputs.addAll(input.getJarInputs());
+            jarInputs.addAll(input.getJarInputs())
         }
         //because the multi-dex is turned on,so the jarInput.size()==1 in theory.
         if (jarInputs.size() != 1) {
@@ -176,7 +164,7 @@ public class ImmutableDexTransform extends Transform {
         }
 
         //init
-        initFileEnv(transformInvocation.getOutputProvider());
+        initFileEnv(transformInvocation.getOutputProvider())
         //get all old dex
         ArrayList<File> oldDexList = new ArrayList<>()
         traversal(new ZipFile(oldApkPath), { ZipEntry zipEntry, byte[] bytes ->
@@ -255,11 +243,20 @@ public class ImmutableDexTransform extends Transform {
 
         //a list for all dex's path,use for checkClassConsistence mtd
         ArrayList<String> dexPathList = new ArrayList<>()
+
+        def dxOutDir = transformInvocation.outputProvider.getContentLocation("main",
+                getOutputTypes(), TransformManager.SCOPE_FULL_PROJECT, Format.DIRECTORY)
+        if (dxOutDir.exists()) {
+            FileOperation.cleanDir(dxOutDir)
+        } else {
+            dxOutDir.mkdirs()
+        }
+
         classPreDir.eachFile { classZip ->
             String classIndexName = classZip.name - ".jar"
             String dexPath = "${dxOutDir.absolutePath}/${classIndexName}.dex"
             dexPathList.add(dexPath)
-            doDex(classIndexName, classZip, project.android.getDexOptions())
+            doDex(dexPath, classZip, project.android.getDexOptions())
         }
 
         checkClassConsistence(dexPathList, allClassSet)
@@ -332,22 +329,22 @@ public class ImmutableDexTransform extends Transform {
     }
 
 
-    private void doDex(String classIndexName, File classZip, def dexOptions) {
+    private void doDex(String dexPath, File classZip, def dexOptions) {
 
         def dexJar = "${project.android.getSdkDirectory()}/build-tools/${project.android.buildToolsVersion}/lib/dx.jar"
-        def task = project.tasks.create("dx" + classIndexName + varName, JavaExec.class, new Action<JavaExec>() {
+        def task = project.tasks.create("dx" + (classZip.name - ".jar") + varName, JavaExec.class, new Action<JavaExec>() {
             @Override
             void execute(JavaExec javaExec) {
                 ArrayList<String> execArgs = new ArrayList()
                 execArgs.add("--dex")
                 if (dexOptions.getJumboMode()) {
-                    execArgs.add("--force-jumbo");
+                    execArgs.add("--force-jumbo")
                 }
                 if (dexOptions.getIncremental()) {
-                    execArgs.add("--incremental");
-                    execArgs.add("--no-strict");
+                    execArgs.add("--incremental")
+                    execArgs.add("--no-strict")
                 }
-                execArgs.add("--output=${dxOutDir.absolutePath}/${classIndexName}.dex".toString())
+                execArgs.add("--output=${dexPath}")
                 execArgs.add(classZip.absolutePath)
                 project.logger.info(execArgs.toString())
                 javaExec.setClasspath(project.files(dexJar))
@@ -360,12 +357,17 @@ public class ImmutableDexTransform extends Transform {
 
     public static void inject(Project project, def variant) {
         project.logger.info("prepare inject dex transform ")
-        if (!variant.apkVariantData.variantConfiguration.isMultiDexEnabled()) {
-            project.logger.warn("multidex is diable. we will not replace the dex transform.")
+        if (!variant.mergedFlavor.multiDexEnabled) {
+            project.logger.warn("multidex is disabled. we will not replace the dex transform.")
             return
         }
         if (!FileOperation.isLegalFile(project.tinkerPatch.oldApk)) {
             project.logger.warn("oldApk is illegal. we will not replace the dex transform.")
+            return
+        }
+        try {
+            Class.forName("com.android.build.gradle.internal.transforms.DexTransform")
+        } catch (ClassNotFoundException e) {
             return
         }
 
@@ -373,12 +375,14 @@ public class ImmutableDexTransform extends Transform {
             @Override
             public void graphPopulated(TaskExecutionGraph taskGraph) {
                 for (Task task : taskGraph.getAllTasks()) {
+                    if (task.project != project) {
+                        continue
+                    }
                     if (task instanceof TransformTask && task.name.toLowerCase().contains(variant.name.toLowerCase())) {
-
-                        if (((TransformTask) task).getTransform() instanceof DexTransform && !(((TransformTask) task).getTransform() instanceof ImmutableDexTransform)) {
+                        if (((TransformTask) task).getTransform().getClass() == Class.forName("com.android.build.gradle.internal.transforms.DexTransform") && !(((TransformTask) task).getTransform() instanceof ImmutableDexTransform)) {
                             project.logger.warn("find dex transform. transform class: " + task.transform.getClass() + " . task name: " + task.name)
 
-                            DexTransform dexTransform = task.transform
+                            def dexTransform = task.transform
                             ImmutableDexTransform hookDexTransform = new ImmutableDexTransform(project,
                                     variant, dexTransform)
                             project.logger.info("variant name: " + variant.name)
@@ -387,12 +391,12 @@ public class ImmutableDexTransform extends Transform {
                             field.setAccessible(true)
                             field.set(task, hookDexTransform)
                             project.logger.warn("transform class after hook: " + task.transform.getClass())
-                            break;
+                            break
                         }
                     }
                 }
             }
-        });
+        })
 
     }
 
@@ -503,14 +507,14 @@ public class ImmutableDexTransform extends Transform {
 
     public static void traversal(ZipFile zipFile, Closure callback) {
         try {
-            Enumeration<? extends ZipEntry> enumeration = zipFile.entries();
+            Enumeration<? extends ZipEntry> enumeration = zipFile.entries()
             while (enumeration.hasMoreElements()) {
-                ZipEntry entry = enumeration.nextElement();
+                ZipEntry entry = enumeration.nextElement()
                 callback.call(entry, zipFile.getInputStream(entry).bytes)
             }
         } catch (IOException e) {
-            e.printStackTrace();
-            Utils.closeQuietly(zipFile);
+            e.printStackTrace()
+            Utils.closeQuietly(zipFile)
         }
     }
 }

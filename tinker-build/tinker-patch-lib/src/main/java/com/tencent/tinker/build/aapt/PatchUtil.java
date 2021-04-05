@@ -18,6 +18,7 @@ package com.tencent.tinker.build.aapt;
 
 import com.tencent.tinker.build.aapt.RDotTxtEntry.IdType;
 import com.tencent.tinker.build.aapt.RDotTxtEntry.RType;
+import com.tencent.tinker.commons.util.IOHelper;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -72,13 +73,7 @@ public final class PatchUtil {
             } catch (Exception e) {
                 e.printStackTrace();
             } finally {
-                if (bufferedReader != null) {
-                    try {
-                        bufferedReader.close();
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                }
+                IOHelper.closeQuietly(bufferedReader);
             }
         }
         return rTypeResourceMap;
@@ -116,16 +111,16 @@ public final class PatchUtil {
                 if (!rType.equals(RType.STYLEABLE)) {
                     Set<RDotTxtEntry> set = entry.getValue();
                     for (RDotTxtEntry rDotTxtEntry : set) {
-//                        if (rType.equals(RType.STYLE)) {
-                            String rawName = aaptResourceCollector.getRawName(rType, rDotTxtEntry.name);
-                            if (StringUtil.isBlank(rawName)) {
-//                                System.err.println("Blank?" + rDotTxtEntry.name);
-                                rawName = rDotTxtEntry.name;
-                            }
-                            publicWriter.println("<public type=\"" + rType + "\" name=\"" + rawName + "\" id=\"" + rDotTxtEntry.idValue.trim() + "\" />");
-//                        } else {
-//                            publicWriter.println("<public type=\"" + rType + "\" name=\"" + rDotTxtEntry.name + "\" id=\"" + rDotTxtEntry.idValue + "\" />");
-//                        }
+                        // if (rType.equals(RType.STYLE)) {
+                        String rawName = aaptResourceCollector.getRawName(rType, rDotTxtEntry.name);
+                        if (StringUtil.isBlank(rawName)) {
+                            // System.err.println("Blank?" + rDotTxtEntry.name);
+                            rawName = rDotTxtEntry.name;
+                        }
+                        publicWriter.println("<public type=\"" + rType + "\" name=\"" + rawName + "\" id=\"" + rDotTxtEntry.idValue.trim() + "\" />");
+                        // } else {
+                        //     publicWriter.println("<public type=\"" + rType + "\" name=\"" + rDotTxtEntry.name + "\" id=\"" + rDotTxtEntry.idValue + "\" />");
+                        // }
                     }
                     Set<String> ignoreIdSet = aaptResourceCollector.getIgnoreIdSet();
                     for (RDotTxtEntry rDotTxtEntry : set) {
@@ -134,7 +129,7 @@ public final class PatchUtil {
                         } else if (rType.equals(RType.STYLE)) {
 
                             if (rDotTxtEntry.name.indexOf(Constant.Symbol.UNDERLINE) > 0) {
-//idsWriter.println("<item type=\""+rType+"\" name=\""+(rDotTxtEntry.name.replace(Constant.Symbol.UNDERLINE, Constant.Symbol.DOT))+"\"/>");
+                                // idsWriter.println("<item type=\""+rType+"\" name=\""+(rDotTxtEntry.name.replace(Constant.Symbol.UNDERLINE, Constant.Symbol.DOT))+"\"/>");
                             }
                         }
                     }

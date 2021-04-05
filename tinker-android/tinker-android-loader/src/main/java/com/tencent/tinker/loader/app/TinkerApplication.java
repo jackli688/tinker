@@ -20,12 +20,13 @@ import android.annotation.TargetApi;
 import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
+import android.os.Handler;
 import android.os.SystemClock;
 
+import com.tencent.tinker.anno.Keep;
 import com.tencent.tinker.loader.TinkerLoader;
 import com.tencent.tinker.loader.TinkerRuntimeException;
 import com.tencent.tinker.loader.TinkerUncaughtHandler;
@@ -38,23 +39,20 @@ import java.lang.reflect.Method;
 
 /**
  * Created by zhangshaowen on 16/3/8.
- * <p/>
- * A base class for implementing an Application that delegates to an {@link ApplicationLifeCycle}
- * instance. This is used in conjunction with secondary dex files so that the logic that would
- * normally live in the Application class is loaded after the secondary dexes are loaded.
  */
 public abstract class TinkerApplication extends Application {
-
-    //oh, we can use ShareConstants, because they are loader class and static final!
-    private static final int    TINKER_DISABLE         = ShareConstants.TINKER_DISABLE;
     private static final String INTENT_PATCH_EXCEPTION = ShareIntentUtil.INTENT_PATCH_EXCEPTION;
-    private static final String TINKER_LOADER_METHOD   = "tryLoad";
+    private static final String TINKER_LOADER_METHOD = "tryLoad";
+
+    private static final TinkerApplication[] SELF_HOLDER = {null};
+
     /**
      * tinkerFlags, which types is supported
      * dex only, library only, all support
      * default: TINKER_ENABLE_ALL
      */
-    private final int     tinkerFlags;
+    private final int tinkerFlags;
+
     /**
      * whether verify md5 when we load dex or lib
      * they store at data/data/package, and we had verity them at the :patch process.
@@ -62,193 +60,224 @@ public abstract class TinkerApplication extends Application {
      * default:false
      */
     private final boolean tinkerLoadVerifyFlag;
-    private final String  delegateClassName;
-    private final String  loaderClassName;
+    private final String delegateClassName;
+    private final String loaderClassName;
 
     /**
      * if we have load patch, we should use safe mode
      */
-    private       boolean useSafeMode;
-    private       Intent  tinkerResultIntent;
+    private boolean useSafeMode;
+    protected Intent tinkerResultIntent;
 
-    private ApplicationLike applicationLike = null;
+    protected ClassLoader mCurrentClassLoader = null;
+    private Handler mInlineFence = null;
 
-    private long applicationStartElapsedTime;
-    private long applicationStartMillisTime;
+    private final boolean useDelegateLastClassLoader;
 
-    /**
-     * current build.
-     */
     protected TinkerApplication(int tinkerFlags) {
-        this(tinkerFlags, "com.tencent.tinker.loader.app.DefaultApplicationLike", TinkerLoader.class.getName(), false);
+        this(tinkerFlags, "com.tencent.tinker.entry.DefaultApplicationLike",
+                TinkerLoader.class.getName(), false, false);
     }
 
-    /**
-     * @param delegateClassName The fully-qualified name of the {@link ApplicationLifeCycle} class
-     *                          that will act as the delegate for application lifecycle callbacks.
-     */
+    protected TinkerApplication(int tinkerFlags, String delegateClassName) {
+        this(tinkerFlags, delegateClassName, TinkerLoader.class.getName(), false, false);
+    }
+
     protected TinkerApplication(int tinkerFlags, String delegateClassName,
                                 String loaderClassName, boolean tinkerLoadVerifyFlag) {
+        this(tinkerFlags, delegateClassName, loaderClassName, tinkerLoadVerifyFlag, true);
+    }
+
+    protected TinkerApplication(int tinkerFlags, String delegateClassName,
+                                String loaderClassName, boolean tinkerLoadVerifyFlag,
+                                boolean useDelegateLastClassLoader) {
+        synchronized (SELF_HOLDER) {
+            SELF_HOLDER[0] = this;
+        }
         this.tinkerFlags = tinkerFlags;
         this.delegateClassName = delegateClassName;
         this.loaderClassName = loaderClassName;
         this.tinkerLoadVerifyFlag = tinkerLoadVerifyFlag;
+        this.useDelegateLastClassLoader = useDelegateLastClassLoader;
     }
 
-    protected TinkerApplication(int tinkerFlags, String delegateClassName) {
-        this(tinkerFlags, delegateClassName, TinkerLoader.class.getName(), false);
+    public static TinkerApplication getInstance() {
+        synchronized (SELF_HOLDER) {
+            if (SELF_HOLDER[0] == null) {
+                throw new IllegalStateException("TinkerApplication is not initialized.");
+            }
+            return SELF_HOLDER[0];
+        }
     }
 
-    private ApplicationLike createDelegate() {
+    private void loadTinker() {
+        try {
+            //reflect tinker loader, because loaderClass may be define by user!
+            Class<?> tinkerLoadClass = Class.forName(loaderClassName, false, TinkerApplication.class.getClassLoader());
+            Method loadMethod = tinkerLoadClass.getMethod(TINKER_LOADER_METHOD, TinkerApplication.class);
+            Constructor<?> constructor = tinkerLoadClass.getConstructor();
+            tinkerResultIntent = (Intent) loadMethod.invoke(constructor.newInstance(), this);
+        } catch (Throwable e) {
+            //has exception, put exception error code
+            tinkerResultIntent = new Intent();
+            ShareIntentUtil.setIntentReturnCode(tinkerResultIntent, ShareConstants.ERROR_LOAD_PATCH_UNKNOWN_EXCEPTION);
+            tinkerResultIntent.putExtra(INTENT_PATCH_EXCEPTION, e);
+        }
+    }
+
+    private Handler createInlineFence(Application app,
+                                      int tinkerFlags,
+                                      String delegateClassName,
+                                      boolean tinkerLoadVerifyFlag,
+                                      long applicationStartElapsedTime,
+                                      long applicationStartMillisTime,
+                                      Intent resultIntent) {
         try {
             // Use reflection to create the delegate so it doesn't need to go into the primary dex.
             // And we can also patch it
-            Class<?> delegateClass = Class.forName(delegateClassName, false, getClassLoader());
-            Constructor<?> constructor = delegateClass.getConstructor(Application.class, int.class, boolean.class,
-                long.class, long.class, Intent.class);
-            return (ApplicationLike) constructor.newInstance(this, tinkerFlags, tinkerLoadVerifyFlag,
-                applicationStartElapsedTime, applicationStartMillisTime, tinkerResultIntent);
-        } catch (Throwable e) {
-            throw new TinkerRuntimeException("createDelegate failed", e);
+            final Class<?> delegateClass = Class.forName(delegateClassName, false, mCurrentClassLoader);
+            final Constructor<?> constructor = delegateClass.getConstructor(Application.class, int.class, boolean.class,
+                    long.class, long.class, Intent.class);
+            final Object appLike = constructor.newInstance(app, tinkerFlags, tinkerLoadVerifyFlag,
+                    applicationStartElapsedTime, applicationStartMillisTime, resultIntent);
+            final Class<?> inlineFenceClass = Class.forName(
+                    "com.tencent.tinker.entry.TinkerApplicationInlineFence", false, mCurrentClassLoader);
+            final Class<?> appLikeClass = Class.forName(
+                    "com.tencent.tinker.entry.ApplicationLike", false, mCurrentClassLoader);
+            final Constructor<?> inlineFenceCtor = inlineFenceClass.getConstructor(appLikeClass);
+            inlineFenceCtor.setAccessible(true);
+            return (Handler) inlineFenceCtor.newInstance(appLike);
+        } catch (Throwable thr) {
+            throw new TinkerRuntimeException("createInlineFence failed", thr);
         }
     }
 
-    private synchronized void ensureDelegate() {
-        if (applicationLike == null) {
-            applicationLike = createDelegate();
-        }
-    }
-
-    /**
-     * Hook for sub-classes to run logic after the {@link Application#attachBaseContext} has been
-     * called but before the delegate is created. Implementors should be very careful what they do
-     * here since {@link android.app.Application#onCreate} will not have yet been called.
-     */
-    private void onBaseContextAttached(Context base) {
-        applicationStartElapsedTime = SystemClock.elapsedRealtime();
-        applicationStartMillisTime = System.currentTimeMillis();
-        loadTinker();
-        ensureDelegate();
-        applicationLike.onBaseContextAttached(base);
-        //reset save mode
-        if (useSafeMode) {
-            String processName = ShareTinkerInternals.getProcessName(this);
-            String preferName = ShareConstants.TINKER_OWN_PREFERENCE_CONFIG + processName;
-            SharedPreferences sp = getSharedPreferences(preferName, Context.MODE_PRIVATE);
-            sp.edit().putInt(ShareConstants.TINKER_SAFE_MODE_COUNT, 0).commit();
+    protected void onBaseContextAttached(Context base, long applicationStartElapsedTime, long applicationStartMillisTime) {
+        try {
+            loadTinker();
+            mCurrentClassLoader = base.getClassLoader();
+            mInlineFence = createInlineFence(this, tinkerFlags, delegateClassName,
+                    tinkerLoadVerifyFlag, applicationStartElapsedTime, applicationStartMillisTime,
+                    tinkerResultIntent);
+            TinkerInlineFenceAction.callOnBaseContextAttached(mInlineFence, base);
+            //reset save mode
+            if (useSafeMode) {
+                ShareTinkerInternals.setSafeModeCount(this, 0);
+            }
+        } catch (TinkerRuntimeException e) {
+            throw e;
+        } catch (Throwable thr) {
+            throw new TinkerRuntimeException(thr.getMessage(), thr);
         }
     }
 
     @Override
     protected void attachBaseContext(Context base) {
         super.attachBaseContext(base);
+        final long applicationStartElapsedTime = SystemClock.elapsedRealtime();
+        final long applicationStartMillisTime = System.currentTimeMillis();
         Thread.setDefaultUncaughtExceptionHandler(new TinkerUncaughtHandler(this));
-        onBaseContextAttached(base);
-    }
-
-    private void loadTinker() {
-        //disable tinker, not need to install
-        if (tinkerFlags == TINKER_DISABLE) {
-            return;
-        }
-        tinkerResultIntent = new Intent();
-        try {
-            //reflect tinker loader, because loaderClass may be define by user!
-            Class<?> tinkerLoadClass = Class.forName(loaderClassName, false, getClassLoader());
-
-            Method loadMethod = tinkerLoadClass.getMethod(TINKER_LOADER_METHOD, TinkerApplication.class);
-            Constructor<?> constructor = tinkerLoadClass.getConstructor();
-            tinkerResultIntent = (Intent) loadMethod.invoke(constructor.newInstance(), this);
-        } catch (Throwable e) {
-            //has exception, put exception error code
-            ShareIntentUtil.setIntentReturnCode(tinkerResultIntent, ShareConstants.ERROR_LOAD_PATCH_UNKNOWN_EXCEPTION);
-            tinkerResultIntent.putExtra(INTENT_PATCH_EXCEPTION, e);
-        }
+        onBaseContextAttached(base, applicationStartElapsedTime, applicationStartMillisTime);
     }
 
     @Override
     public void onCreate() {
         super.onCreate();
-        ensureDelegate();
-        applicationLike.onCreate();
+        if (mInlineFence == null) {
+            return;
+        }
+        TinkerInlineFenceAction.callOnCreate(mInlineFence);
     }
 
     @Override
     public void onTerminate() {
         super.onTerminate();
-        if (applicationLike != null) {
-            applicationLike.onTerminate();
+        if (mInlineFence == null) {
+            return;
         }
+        TinkerInlineFenceAction.callOnTerminate(mInlineFence);
     }
 
     @Override
     public void onLowMemory() {
         super.onLowMemory();
-        if (applicationLike != null) {
-            applicationLike.onLowMemory();
+        if (mInlineFence == null) {
+            return;
         }
+        TinkerInlineFenceAction.callOnLowMemory(mInlineFence);
     }
 
     @TargetApi(14)
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
-        if (applicationLike != null) {
-            applicationLike.onTrimMemory(level);
+        if (mInlineFence == null) {
+            return;
         }
+        TinkerInlineFenceAction.callOnTrimMemory(mInlineFence, level);
     }
 
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        if (applicationLike != null) {
-            applicationLike.onConfigurationChanged(newConfig);
+        if (mInlineFence == null) {
+            return;
         }
+        TinkerInlineFenceAction.callOnConfigurationChanged(mInlineFence, newConfig);
     }
 
     @Override
     public Resources getResources() {
-        Resources resources = super.getResources();
-        if (applicationLike != null) {
-            return applicationLike.getResources(resources);
+        final Resources resources = super.getResources();
+        if (mInlineFence == null) {
+            return resources;
         }
-        return resources;
+        return TinkerInlineFenceAction.callGetResources(mInlineFence, resources);
     }
 
     @Override
     public ClassLoader getClassLoader() {
-        ClassLoader classLoader = super.getClassLoader();
-        if (applicationLike != null) {
-            return applicationLike.getClassLoader(classLoader);
+        final ClassLoader classLoader = super.getClassLoader();
+        if (mInlineFence == null) {
+            return classLoader;
         }
-        return classLoader;
+        return TinkerInlineFenceAction.callGetClassLoader(mInlineFence, classLoader);
     }
 
     @Override
     public AssetManager getAssets() {
-        AssetManager assetManager = super.getAssets();
-        if (applicationLike != null) {
-            return applicationLike.getAssets(assetManager);
+        final AssetManager assets = super.getAssets();
+        if (mInlineFence == null) {
+            return assets;
         }
-        return assetManager;
+        return TinkerInlineFenceAction.callGetAssets(mInlineFence, assets);
     }
 
     @Override
     public Object getSystemService(String name) {
-        Object service = super.getSystemService(name);
-        if (applicationLike != null) {
-            return applicationLike.getSystemService(name, service);
+        final Object service = super.getSystemService(name);
+        if (mInlineFence == null) {
+            return service;
         }
-        return service;
+        return TinkerInlineFenceAction.callGetSystemService(mInlineFence, name, service);
     }
 
     @Override
     public Context getBaseContext() {
-        Context base = super.getBaseContext();
-        if (applicationLike != null) {
-            return applicationLike.getBaseContext(base);
+        final Context base = super.getBaseContext();
+        if (mInlineFence == null) {
+            return base;
         }
-        return base;
+        return TinkerInlineFenceAction.callGetBaseContext(mInlineFence, base);
+    }
+
+    @Keep
+    public int mzNightModeUseOf() {
+        if (mInlineFence == null) {
+            // Return 1 for default according to MeiZu's announcement.
+            return 1;
+        }
+        return TinkerInlineFenceAction.callMZNightModeUseOf(mInlineFence);
     }
 
     public void setUseSafeMode(boolean useSafeMode) {
@@ -261,5 +290,9 @@ public abstract class TinkerApplication extends Application {
 
     public int getTinkerFlags() {
         return tinkerFlags;
+    }
+
+    public boolean isUseDelegateLastClassLoader() {
+        return useDelegateLastClassLoader;
     }
 }

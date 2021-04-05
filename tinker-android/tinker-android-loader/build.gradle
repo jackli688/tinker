@@ -11,12 +11,24 @@ android {
     defaultConfig {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
+
+        buildConfigField "String", "TINKER_VERSION", "\"${rootProject.ext.VERSION_NAME}\""
+
+        manifestPlaceholders = [TINKER_VERSION: "${rootProject.ext.VERSION_NAME}"]
+
+        consumerProguardFiles file('../consumer-proguard.txt')
+    }
+
+    lintOptions {
+        disable 'LongLogTag'
     }
 }
 
 dependencies {
-    compile fileTree(dir: 'libs', include: ['*.jar'])
-    testCompile 'junit:junit:4.12'
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    compileOnly fileTree(dir: 'stubs', include: ['*.jar'])
+    testImplementation 'junit:junit:4.12'
+    implementation project(':tinker-android:tinker-android-anno-support')
 }
 
 task buildTinkerSdk(type: Copy, dependsOn: [build]) {

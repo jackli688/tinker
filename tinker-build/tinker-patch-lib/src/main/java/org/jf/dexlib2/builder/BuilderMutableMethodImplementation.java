@@ -74,7 +74,6 @@ import org.jf.dexlib2.builder.instruction.BuilderInstruction22s;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction22t;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction22x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction23x;
-import org.jf.dexlib2.builder.instruction.BuilderInstruction25x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction30t;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction31c;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction31i;
@@ -115,7 +114,6 @@ import org.jf.dexlib2.iface.instruction.formats.Instruction22s;
 import org.jf.dexlib2.iface.instruction.formats.Instruction22t;
 import org.jf.dexlib2.iface.instruction.formats.Instruction22x;
 import org.jf.dexlib2.iface.instruction.formats.Instruction23x;
-import org.jf.dexlib2.iface.instruction.formats.Instruction25x;
 import org.jf.dexlib2.iface.instruction.formats.Instruction30t;
 import org.jf.dexlib2.iface.instruction.formats.Instruction31c;
 import org.jf.dexlib2.iface.instruction.formats.Instruction31i;
@@ -502,6 +500,9 @@ public class BuilderMutableMethodImplementation implements MethodImplementation 
                         ((BuilderSwitchPayload) targetInstruction).referrer = location;
                         break;
                     }
+                    default: {
+                        break;
+                    }
                 }
             }
         }
@@ -568,6 +569,9 @@ public class BuilderMutableMethodImplementation implements MethodImplementation 
                             }
                             break;
                         }
+                        default: {
+                            break;
+                        }
                     }
                 }
             }
@@ -608,8 +612,7 @@ public class BuilderMutableMethodImplementation implements MethodImplementation 
         } else {
             do {
                 index++;
-            }
-            while (index < instructionList.size() && instructionList.get(index).codeAddress <= codeAddress);
+            } while (index < instructionList.size() && instructionList.get(index).codeAddress <= codeAddress);
             return index - 1;
         }
     }
@@ -722,9 +725,6 @@ public class BuilderMutableMethodImplementation implements MethodImplementation 
                 return;
             case Format23x:
                 setInstruction(location, newBuilderInstruction23x((Instruction23x) instruction));
-                return;
-            case Format25x:
-                setInstruction(location, newBuilderInstruction25x((Instruction25x) instruction));
                 return;
             case Format30t:
                 setInstruction(location, newBuilderInstruction30t(location.codeAddress,
@@ -977,18 +977,6 @@ public class BuilderMutableMethodImplementation implements MethodImplementation 
                 instruction.getRegisterF(),
                 instruction.getRegisterG(),
                 convertReference(instruction.getReference()));
-    }
-
-    @Nonnull
-    private BuilderInstruction25x newBuilderInstruction25x(@Nonnull Instruction25x instruction) {
-        return new BuilderInstruction25x(
-                instruction.getOpcode(),
-                instruction.getParameterRegisterCount(),
-                instruction.getRegisterFixedC(),
-                instruction.getRegisterParameterD(),
-                instruction.getRegisterParameterE(),
-                instruction.getRegisterParameterF(),
-                instruction.getRegisterParameterG());
     }
 
     @Nonnull

@@ -90,7 +90,7 @@ public final class ExcludedClassModifiedChecker {
                  * 2. Primary new dex is missing.
                  * 3. There are not any loader classes in primary old dex.
                  * 4. There are some new loader classes added in new primary dex.
-                 * 5. Loader classes in old primary dex are modified, deleted in new primary dex.
+                 * 5. Loader classes in old primary dex are modified in new primary dex.
                  * 6. Loader classes are found in secondary old dexes.
                  * 7. Loader classes are found in secondary new dexes.
                  */
@@ -112,7 +112,7 @@ public final class ExcludedClassModifiedChecker {
                             if (deletedClassInfos.isEmpty() && changedClassInfosMap.isEmpty() && !addedClassInfos.isEmpty()) {
                                 stmCode = STMCODE_ERROR_LOADER_CLASS_NOT_IN_PRIMARY_OLD_DEX;
                             } else {
-                                if (deletedClassInfos.isEmpty() && addedClassInfos.isEmpty()) {
+                                if (addedClassInfos.isEmpty()) {
                                     // class descriptor is completely matches, see if any contents changes.
                                     ArrayList<String> removeClasses = new ArrayList<>();
                                     for (String classname : changedClassInfosMap.keySet()) {
@@ -185,21 +185,31 @@ public final class ExcludedClassModifiedChecker {
                 }
                 case STMCODE_ERROR_LOADER_CLASS_IN_PRIMARY_DEX_MISMATCH: {
                     throw new TinkerPatchException(
-                        "loader classes in old primary dex are mismatched to those in new primary dex, \n"
-                            + "if deleted classes is not empty, check if your dex division strategy is fine. \n"
-                            + "added classes: " + Utils.collectionToString(addedClassInfos) + "\n"
-                            + "deleted classes: " + Utils.collectionToString(deletedClassInfos)
+                        "there's loader classes added in new primary dex, such these changes will not take effect.\n"
+                            + "added classes: " + Utils.collectionToString(addedClassInfos)
                     );
                 }
                 case STMCODE_ERROR_LOADER_CLASS_FOUND_IN_SECONDARY_OLD_DEX: {
-                    throw new TinkerPatchException("loader classes are found in old secondary dex. Found classes: " + Utils.collectionToString(oldClassesDescToCheck));
+                    final String msg = "loader classes are found in old secondary dex. Found classes: " + Utils.collectionToString(oldClassesDescToCheck);
+                    if (config.mAllowLoaderInAnyDex) {
+                        Logger.d(msg);
+                        return;
+                    } else {
+                        throw new TinkerPatchException(msg);
+                    }
                 }
                 case STMCODE_ERROR_LOADER_CLASS_FOUND_IN_SECONDARY_NEW_DEX: {
-                    throw new TinkerPatchException("loader classes are found in new secondary dex. Found classes: " + Utils.collectionToString(newClassesDescToCheck));
+                    final String msg = "loader classes are found in new secondary dex. Found classes: " + Utils.collectionToString(newClassesDescToCheck);
+                    if (config.mAllowLoaderInAnyDex) {
+                        Logger.d(msg);
+                        return;
+                    } else {
+                        throw new TinkerPatchException(msg);
+                    }
                 }
                 case STMCODE_ERROR_LOADER_CLASS_CHANGED: {
                     String msg =
-                        "some loader class has been changed in new dex."
+                        "some loader class has been changed in new primary dex."
                             + " Such these changes will not take effect!!"
                             + " related classes: "
                             + Utils.collectionToString(changedClassInfosMap.keySet());

@@ -24,11 +24,21 @@
 
         <!--if you don't set sevenZip path, we just use 7za to try-->
         <sevenZipPath value="/usr/local/bin/7za"/>
+        <!-- demo for windows-->
+        <!-- <sevenZipPath value="C:\Program Files (x86)\7-Zip\7z.exe"/> -->
         <!--Whether tinker should treat the base apk as the one being protected by app-->
         <!--protection tools.-->
         <!--If this attribute is true, the generated patch package will contain a-->
         <!--dex including all changed classes instead of any dexdiff patch-info files.-->
         <isProtectedApp value="false"/>
+
+        <!--Whether tinker should support component hotplug (add new component dynamically).-->
+        <!--If this attribute is true, the component added in new apk will be available after-->
+        <!--patch is successfully loaded. Otherwise an error would be announced when generating patch-->
+        <!--on compile-time.-->
+        <!---->
+        <!--Notice that currently this feature is incubating and only support NON-EXPORTED Activity-->
+        <supportHotplugComponent value="false"/>
     </issue>
 
     <issue id="dex">
@@ -60,6 +70,11 @@
         <pattern value="lib/*/*.so"/>
     </issue>
 
+    <issue id="arkHot">
+        <path value="arkHot"/>
+        <name value="patch.apk"/>
+    </issue>
+
     <issue id="resource">
         <!--what resource in apk are expected to deal with tinkerPatch-->
         <!--it support * or ? pattern.-->
@@ -74,6 +89,8 @@
         <!--it support * or ? pattern.-->
         <!--Such as I want assets/meta.txt use the base.apk version whatever it is change ir not.-->
         <ignoreChange value="assets/sample_meta.txt"/>
+        <!--ignore any warning caused by add, delete or modify changes on resources specified by this pattern.-->
+        <ignoreChangeWarning value="" />
         <!--default 100kb-->
         <!--for modify resource, if it is larger than 'largeModSize'-->
         <!--we would like to use bsdiff algorithm to reduce patch file size-->
@@ -99,7 +116,7 @@
     <!--sign, if you want to sign the apk, and if you want to use 7zip, you must fill in the following data-->
     <issue id="sign">
         <!--the signature file path, in window use \, in linux use /, and the default path is the running location-->
-        <path value="tool_output/release.keystore"/>
+        <path value="release.keystore"/>
         <!--storepass-->
         <storepass value="testres"/>
         <!--keypass-->

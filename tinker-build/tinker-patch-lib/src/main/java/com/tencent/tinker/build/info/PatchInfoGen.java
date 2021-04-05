@@ -20,10 +20,13 @@ import com.tencent.tinker.build.apkparser.AndroidParser;
 import com.tencent.tinker.build.patch.Configuration;
 import com.tencent.tinker.build.util.TinkerPatchException;
 import com.tencent.tinker.build.util.TypedValue;
+import com.tencent.tinker.commons.util.IOHelper;
 
+import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.text.ParseException;
 import java.util.Properties;
 
@@ -61,15 +64,27 @@ public class PatchInfoGen {
         }
     }
 
+    private void addProtectedAppFlag() {
+        // If user happens to specify a value with this key, just override it for logic correctness.
+        config.mPackageFields.put(TypedValue.PKGMETA_KEY_IS_PROTECTED_APP, config.mIsProtectedApp ? "1" : "0");
+    }
+
     public void gen() throws Exception {
         addTinkerID();
+        addProtectedAppFlag();
+
         Properties newProperties = new Properties();
         for (String key : config.mPackageFields.keySet()) {
             newProperties.put(key, config.mPackageFields.get(key));
         }
 
         String comment = "base package config field";
-        newProperties.store(new FileOutputStream(packageInfoFile, false), comment);
-
+        OutputStream os = null;
+        try {
+            os = new BufferedOutputStream(new FileOutputStream(packageInfoFile, false));
+            newProperties.store(os, comment);
+        } finally {
+            IOHelper.closeQuietly(os);
+        }
     }
 }

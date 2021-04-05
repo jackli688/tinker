@@ -22,6 +22,7 @@ import com.tencent.tinker.android.dex.Dex;
 import com.tencent.tinker.android.dex.DexFormat;
 import com.tencent.tinker.build.dexpatcher.DexPatchGenerator;
 import com.tencent.tinker.build.dexpatcher.util.ChangedClassesDexClassInfoCollector;
+import com.tencent.tinker.build.dexpatcher.util.PatternUtils;
 import com.tencent.tinker.build.info.InfoWriter;
 import com.tencent.tinker.build.patch.Configuration;
 import com.tencent.tinker.build.util.DexClassesComparator;
@@ -37,12 +38,22 @@ import com.tencent.tinker.build.util.Utils;
 import com.tencent.tinker.commons.dexpatcher.DexPatchApplier;
 import com.tencent.tinker.commons.dexpatcher.DexPatcherLogger.IDexPatcherLogger;
 
+import org.jf.dexlib2.DexFileFactory;
+import org.jf.dexlib2.Opcodes;
+import org.jf.dexlib2.ReferenceType;
 import org.jf.dexlib2.builder.BuilderMutableMethodImplementation;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.DexFile;
 import org.jf.dexlib2.iface.Field;
 import org.jf.dexlib2.iface.Method;
 import org.jf.dexlib2.iface.MethodImplementation;
+import org.jf.dexlib2.iface.instruction.Instruction;
+import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
+import org.jf.dexlib2.iface.reference.FieldReference;
+import org.jf.dexlib2.iface.reference.MethodReference;
+import org.jf.dexlib2.iface.reference.TypeReference;
+import org.jf.dexlib2.util.MethodUtil;
+import org.jf.dexlib2.util.TypeUtils;
 import org.jf.dexlib2.writer.builder.BuilderField;
 import org.jf.dexlib2.writer.builder.BuilderMethod;
 import org.jf.dexlib2.writer.builder.DexBuilder;
@@ -53,12 +64,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.AbstractMap;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarFile;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 
 /**
@@ -66,7 +79,7 @@ import java.util.zip.ZipEntry;
  */
 public class DexDiffDecoder extends BaseDecoder {
     private static final String TEST_DEX_NAME = "test.dex";
-    private static final String CHANGED_CLASSES_DEX_NAME = "changed_classes.dex";
+    private static final String CHANGED_CLASSES_DEX_NAME_PREFIX = "changed_classes";
 
     private final InfoWriter logWriter;
     private final InfoWriter metaWriter;
@@ -81,6 +94,12 @@ public class DexDiffDecoder extends BaseDecoder {
     private final Map<String, RelatedInfo> dexNameToRelatedInfoMap;
     private boolean hasDexChanged = false;
     private DexPatcherLoggerBridge dexPatcherLoggerBridge = null;
+
+    private final Set<Pattern> loaderClassPatterns;
+
+    private final Set<String> descOfClassesInApk;
+
+    private final List<File> oldDexFiles;
 
     public DexDiffDecoder(Configuration config, String metaPath, String logPath) throws IOException {
         super(config);
@@ -109,11 +128,25 @@ public class DexDiffDecoder extends BaseDecoder {
         oldAndNewDexFilePairList = new ArrayList<>();
 
         dexNameToRelatedInfoMap = new HashMap<>();
+
+        loaderClassPatterns = new HashSet<>();
+        for (String patternStr : config.mDexLoaderPattern) {
+            loaderClassPatterns.add(
+                    Pattern.compile(
+                            PatternUtils.dotClassNamePatternToDescriptorRegEx(patternStr)
+                    )
+            );
+        }
+
+        descOfClassesInApk = new HashSet<>();
+
+        oldDexFiles = new ArrayList<>();
     }
 
     @Override
     public void onAllPatchesStart() throws IOException, TinkerPatchException {
-
+        descOfClassesInApk.clear();
+        oldDexFiles.clear();
     }
 
     /**
@@ -122,6 +155,14 @@ public class DexDiffDecoder extends BaseDecoder {
      */
     protected String getRelativeDexName(File oldDexFile, File newDexFile) {
         return oldDexFile != null ? getRelativePathStringToOldFile(oldDexFile) : getRelativePathStringToNewFile(newDexFile);
+    }
+
+    private void collectClassesInDex(File dexFile) throws IOException {
+        Logger.d("Collect class descriptors in " + dexFile.getName());
+        final DexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.forApi(29));
+        for (org.jf.dexlib2.iface.ClassDef classDef : dex.getClasses()) {
+            descOfClassesInApk.add(classDef.getType());
+        }
     }
 
     @SuppressWarnings("NewApi")
@@ -154,7 +195,6 @@ public class DexDiffDecoder extends BaseDecoder {
         }
 
         File dexDiffOut = getOutputPath(newFile).toFile();
-
         final String newMd5 = getRawOrWrappedDexMD5(newFile);
 
         //new add file
@@ -163,6 +203,10 @@ public class DexDiffDecoder extends BaseDecoder {
             copyNewDexAndLogToDexMeta(newFile, newMd5, dexDiffOut);
             return true;
         }
+
+        // Collect class descriptors here for further checking.
+        collectClassesInDex(oldFile);
+        oldDexFiles.add(oldFile);
 
         final String oldMd5 = getRawOrWrappedDexMD5(oldFile);
 
@@ -192,6 +236,8 @@ public class DexDiffDecoder extends BaseDecoder {
             return;
         }
 
+        checkIfLoaderClassesReferToNonLoaderClasses();
+
         if (config.mIsProtectedApp) {
             generateChangedClassesDexFile();
         } else {
@@ -201,12 +247,140 @@ public class DexDiffDecoder extends BaseDecoder {
         addTestDex();
     }
 
+    private boolean isReferenceFromLoaderClassValid(String refereeTypeDesc) {
+        if (TypeUtils.isPrimitiveType(refereeTypeDesc)) {
+            return true;
+        }
+        if (!descOfClassesInApk.contains(refereeTypeDesc)) {
+            return true;
+        }
+        if (Utils.isStringMatchesPatterns(refereeTypeDesc, loaderClassPatterns)) {
+            return true;
+        }
+        return false;
+    }
+
+    private void checkIfLoaderClassesReferToNonLoaderClasses()
+            throws IOException, TinkerPatchException {
+        boolean hasInvalidCases = false;
+        for (File dexFile : oldDexFiles) {
+            Logger.d("Check if loader classes in " + dexFile.getName()
+                    + " refer to any classes that is not in loader class patterns.");
+            final DexFile dex = DexFileFactory.loadDexFile(dexFile, Opcodes.forApi(29));
+            for (org.jf.dexlib2.iface.ClassDef classDef : dex.getClasses()) {
+                final String currClassDesc = classDef.getType();
+                if (!Utils.isStringMatchesPatterns(currClassDesc, loaderClassPatterns)) {
+                    continue;
+                }
+                for (Field field : classDef.getFields()) {
+                    final String currFieldTypeDesc = field.getType();
+                    if (!isReferenceFromLoaderClassValid(currFieldTypeDesc)) {
+                        Logger.e("FATAL: field '%s' in loader class '%s' refers to class '%s' which "
+                                        + "is not loader class, this may cause crash when patch is loaded.",
+                                field.getName(), currClassDesc, currFieldTypeDesc);
+                        hasInvalidCases = true;
+                    }
+                }
+                for (Method method : classDef.getMethods()) {
+                    boolean isCurrentMethodInvalid = false;
+                    final String currMethodRetTypeDesc = method.getReturnType();
+                    if (!isReferenceFromLoaderClassValid(currMethodRetTypeDesc)) {
+                        Logger.e("FATAL: method '%s:%s' in loader class '%s' refers to class '%s' which "
+                                        + "is not loader class, this may cause crash when patch is loaded.",
+                                method.getName(), MethodUtil.getShorty(method.getParameterTypes(), currMethodRetTypeDesc),
+                                currClassDesc, currMethodRetTypeDesc);
+                        isCurrentMethodInvalid = true;
+                    } else {
+                        for (CharSequence paramTypeDesc : method.getParameterTypes()) {
+                            if (!isReferenceFromLoaderClassValid(paramTypeDesc.toString())) {
+                                Logger.e("FATAL: method '%s:%s' in loader class '%s' refers to class '%s' which "
+                                                + "is not loader class, this may cause crash when patch is loaded.",
+                                        method.getName(), MethodUtil.getShorty(method.getParameterTypes(), currMethodRetTypeDesc),
+                                        currClassDesc, paramTypeDesc);
+                                isCurrentMethodInvalid = true;
+                                break;
+                            }
+                        }
+                    }
+                    check_method_impl:
+                    {
+                        final MethodImplementation methodImpl = method.getImplementation();
+                        if (methodImpl == null) {
+                            break check_method_impl;
+                        }
+                        final Iterable<? extends Instruction> insns = methodImpl.getInstructions();
+                        if (!insns.iterator().hasNext()) {
+                            break check_method_impl;
+                        }
+                        for (Instruction insn : insns) {
+                            if (insn instanceof ReferenceInstruction) {
+                                final ReferenceInstruction refInsn = (ReferenceInstruction) insn;
+                                switch (refInsn.getReferenceType()) {
+                                    case ReferenceType.TYPE: {
+                                        final TypeReference typeRefInsn = (TypeReference) refInsn.getReference();
+                                        final String refereeTypeDesc = typeRefInsn.getType();
+                                        if (isReferenceFromLoaderClassValid(refereeTypeDesc)) {
+                                            break;
+                                        }
+                                        Logger.e("FATAL: method '%s:%s' in loader class '%s' refers to class '%s' which "
+                                                        + "is not loader class, this may cause crash when patch is loaded.",
+                                                method.getName(), MethodUtil.getShorty(method.getParameterTypes(), currMethodRetTypeDesc),
+                                                currClassDesc, refereeTypeDesc);
+                                        isCurrentMethodInvalid = true;
+                                        break;
+                                    }
+                                    case ReferenceType.FIELD: {
+                                        final FieldReference fieldRefInsn = (FieldReference) refInsn.getReference();
+                                        final String refereeFieldName = fieldRefInsn.getName();
+                                        final String refereeFieldDefTypeDesc = fieldRefInsn.getDefiningClass();
+                                        if (isReferenceFromLoaderClassValid(refereeFieldDefTypeDesc)) {
+                                            break;
+                                        }
+                                        Logger.e("FATAL: method '%s:%s' in loader class '%s' refers to field '%s' in class '%s' which "
+                                                        + "is not in loader class, this may cause crash when patch is loaded.",
+                                                method.getName(), MethodUtil.getShorty(method.getParameterTypes(), currMethodRetTypeDesc),
+                                                currClassDesc, refereeFieldName, refereeFieldDefTypeDesc);
+                                        isCurrentMethodInvalid = true;
+                                        break;
+                                    }
+                                    case ReferenceType.METHOD: {
+                                        final MethodReference methodRefInsn = (MethodReference) refInsn.getReference();
+                                        final String refereeMethodName = methodRefInsn.getName();
+                                        final Collection<? extends CharSequence> refereeMethodParamTypes = methodRefInsn.getParameterTypes();
+                                        final String refereeMethodRetType = methodRefInsn.getReturnType();
+                                        final String refereeMethodDefClassDesc = methodRefInsn.getDefiningClass();
+                                        if (isReferenceFromLoaderClassValid(refereeMethodDefClassDesc)) {
+                                            break;
+                                        }
+                                        Logger.e("FATAL: method '%s:%s' in loader class '%s' refers to method '%s:%s' in class '%s' which "
+                                                        + "is not in loader class, this may cause crash when patch is loaded.",
+                                                method.getName(), MethodUtil.getShorty(method.getParameterTypes(), currMethodRetTypeDesc),
+                                                currClassDesc, refereeMethodName, MethodUtil.getShorty(refereeMethodParamTypes, refereeMethodRetType), refereeMethodDefClassDesc);
+                                        isCurrentMethodInvalid = true;
+                                        break;
+                                    }
+                                    default: {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (isCurrentMethodInvalid) {
+                        hasInvalidCases = true;
+                    }
+                }
+            }
+        }
+        if (hasInvalidCases) {
+            throw new TinkerPatchException("There are fatal reasons that cause Tinker interrupt"
+                    + " patch generating procedure, see logs above.");
+        }
+    }
+
     @SuppressWarnings("NewApi")
     private void generateChangedClassesDexFile() throws IOException {
         final String dexMode = config.mDexRaw ? "raw" : "jar";
-        final File dest = new File(config.mTempResultDir + "/" + CHANGED_CLASSES_DEX_NAME);
-
-        Logger.d("\nBuilding changed classes dex: %s, size: %d\n", dest.getAbsolutePath(), dest.length());
 
         List<File> oldDexList = new ArrayList<>();
         List<File> newDexList = new ArrayList<>();
@@ -243,10 +417,22 @@ public class DexDiffDecoder extends BaseDecoder {
             descOfChangedClasses.add(classInfo.classDesc);
         }
 
-        DexBuilder dexBuilder = DexBuilder.makeDexBuilder();
+        StringBuilder metaBuilder = new StringBuilder();
+        int changedDexId = 1;
         for (Dex dex : owners) {
             Set<String> descOfChangedClassesInCurrDex = ownerToDescOfChangedClassesMap.get(dex);
             DexFile dexFile = new DexBackedDexFile(org.jf.dexlib2.Opcodes.forApi(20), dex.getBytes());
+            boolean isCurrentDexHasChangedClass = false;
+            for (org.jf.dexlib2.iface.ClassDef classDef : dexFile.getClasses()) {
+                if (descOfChangedClassesInCurrDex.contains(classDef.getType())) {
+                    isCurrentDexHasChangedClass = true;
+                    break;
+                }
+            }
+            if (!isCurrentDexHasChangedClass) {
+                continue;
+            }
+            DexBuilder dexBuilder = new DexBuilder(Opcodes.forApi(23));
             for (org.jf.dexlib2.iface.ClassDef classDef : dexFile.getClasses()) {
                 if (!descOfChangedClassesInCurrDex.contains(classDef.getType())) {
                     continue;
@@ -295,20 +481,41 @@ public class DexDiffDecoder extends BaseDecoder {
                         builderMethods
                 );
             }
+
+            // Write constructed changed classes dex to file and record it in meta file.
+            String changedDexName = null;
+            if (changedDexId == 1) {
+                changedDexName = "classes.dex";
+            } else {
+                changedDexName = "classes" + changedDexId + ".dex";
+            }
+            final File dest = new File(config.mTempResultDir + "/" + changedDexName);
+            final FileDataStore fileDataStore = new FileDataStore(dest);
+            dexBuilder.writeTo(fileDataStore);
+            final String md5 = MD5.getMD5(dest);
+            appendMetaLine(metaBuilder, changedDexName, "", md5, md5, 0, 0, 0, dexMode);
+            ++changedDexId;
         }
 
-        // Write constructed changed classes dex to file and record it in meta file.
-        FileDataStore fileDataStore = new FileDataStore(dest);
-        dexBuilder.writeTo(fileDataStore);
-
-        final String md5 = MD5.getMD5(dest);
-
-        String meta = CHANGED_CLASSES_DEX_NAME + "," + "" + "," + md5 + "," + md5 + "," + 0
-                + "," + 0 + "," + dexMode;
-
-        Logger.d("\nDexDecoder:write changed classes dex meta file data: %s", meta);
-
+        final String meta = metaBuilder.toString();
+        Logger.d("\nDexDecoder:write changed classes dex meta file data:\n%s", meta);
         metaWriter.writeLineToInfoFile(meta);
+    }
+
+    private void appendMetaLine(StringBuilder sb, Object... vals) {
+        if (vals == null || vals.length == 0) {
+            return;
+        }
+        boolean isFirstItem = true;
+        for (Object val : vals) {
+            if (isFirstItem) {
+                isFirstItem = false;
+            } else {
+                sb.append(',');
+            }
+            sb.append(val);
+        }
+        sb.append('\n');
     }
 
     @SuppressWarnings("NewApi")
@@ -362,19 +569,23 @@ public class DexDiffDecoder extends BaseDecoder {
             final String dexName = getRelativeDexName(oldDexFile, newDexFile);
             final RelatedInfo relatedInfo = dexNameToRelatedInfoMap.get(dexName);
             if (!relatedInfo.oldMd5.equals(relatedInfo.newMd5)) {
-                logToDexMeta(newDexFile, oldDexFile, relatedInfo.dexDiffFile, relatedInfo.newOrFullPatchedMd5, relatedInfo.newOrFullPatchedMd5, relatedInfo.dexDiffMd5);
+                logToDexMeta(newDexFile, oldDexFile, relatedInfo.dexDiffFile, relatedInfo.newOrFullPatchedMd5, relatedInfo.newOrFullPatchedMd5, relatedInfo.dexDiffMd5, relatedInfo.newOrFullPatchedCRC);
             } else {
                 // For class N dexes, if new dex is the same as old dex, we should log it as 'copy directly'
                 // in dex meta to fix problems in Art environment.
                 if (realClassNDexFiles.contains(oldDexFile)) {
                     // Bugfix: However, if what we would copy directly is main dex, we should do an additional diff operation
                     // so that patch applier would help us remove all loader classes of it in runtime.
-                    if (dexName.equals(DexFormat.DEX_IN_JAR_NAME)) {
-                        Logger.d("\nDo additional diff on main dex to remove loader classes in it.");
+                    if (config.mRemoveLoaderForAllDex || dexName.equals(DexFormat.DEX_IN_JAR_NAME)) {
+                        if (config.mRemoveLoaderForAllDex) {
+                            Logger.d("\nDo additional diff on every dex to remove loader classes in it, because removeLoaderForAllDex = true");
+                        } else {
+                            Logger.d("\nDo additional diff on main dex to remove loader classes in it.");
+                        }
                         diffDexPairAndFillRelatedInfo(oldDexFile, newDexFile, relatedInfo);
-                        logToDexMeta(newDexFile, oldDexFile, relatedInfo.dexDiffFile, relatedInfo.newOrFullPatchedMd5, relatedInfo.newOrFullPatchedMd5, relatedInfo.dexDiffMd5);
+                        logToDexMeta(newDexFile, oldDexFile, relatedInfo.dexDiffFile, relatedInfo.newOrFullPatchedMd5, relatedInfo.newOrFullPatchedMd5, relatedInfo.dexDiffMd5, relatedInfo.newOrFullPatchedCRC);
                     } else {
-                        logToDexMeta(newDexFile, oldDexFile, null, "0", relatedInfo.oldMd5, "0");
+                        logToDexMeta(newDexFile, oldDexFile, null, "0", relatedInfo.oldMd5, "0", relatedInfo.newOrFullPatchedCRC);
                     }
                 }
             }
@@ -382,7 +593,7 @@ public class DexDiffDecoder extends BaseDecoder {
     }
 
     @SuppressWarnings("NewApi")
-    private void generatePatchedDexInfoFile() {
+    private void generatePatchedDexInfoFile() throws IOException {
         // Generate dex diff out and full patched dex if a pair of dex is different.
         for (AbstractMap.SimpleEntry<File, File> oldAndNewDexFilePair : oldAndNewDexFilePairList) {
             File oldFile = oldAndNewDexFilePair.getKey();
@@ -397,6 +608,7 @@ public class DexDiffDecoder extends BaseDecoder {
                 // can analyze which class of this dex should be kept in small patch.
                 relatedInfo.newOrFullPatchedFile = newFile;
                 relatedInfo.newOrFullPatchedMd5 = relatedInfo.newMd5;
+                relatedInfo.newOrFullPatchedCRC = FileOperation.getFileCrc32(newFile);
             }
         }
     }
@@ -451,6 +663,7 @@ public class DexDiffDecoder extends BaseDecoder {
 
             relatedInfo.newOrFullPatchedFile = tempFullPatchedDexFile;
             relatedInfo.newOrFullPatchedMd5 = MD5.getMD5(tempFullPatchedDexFile);
+            relatedInfo.newOrFullPatchedCRC = FileOperation.getFileCrc32(tempFullPatchedDexFile);
         } catch (Exception e) {
             e.printStackTrace();
             throw new TinkerPatchException(
@@ -475,7 +688,7 @@ public class DexDiffDecoder extends BaseDecoder {
         String md5 = MD5.getMD5(is, 1024);
         is.close();
 
-        String meta = TEST_DEX_NAME + "," + "" + "," + md5 + "," + md5 + "," + 0 + "," + 0 + "," + dexMode;
+        String meta = TEST_DEX_NAME + "," + "" + "," + md5 + "," + md5 + "," + 0 + "," + 0 + "," + 0 + "," + dexMode;
 
         File dest = new File(config.mTempResultDir + "/" + TEST_DEX_NAME);
         FileOperation.copyResourceUsingStream(TEST_DEX_NAME, dest);
@@ -576,7 +789,8 @@ public class DexDiffDecoder extends BaseDecoder {
 
     private void copyNewDexAndLogToDexMeta(File newFile, String newMd5, File output) throws IOException {
         FileOperation.copyFileUsingStream(newFile, output);
-        logToDexMeta(newFile, null, null, newMd5, newMd5, "0");
+        final long newFileCrc = FileOperation.getFileCrc32(newFile);
+        logToDexMeta(newFile, null, null, newMd5, newMd5, "0", newFileCrc);
     }
 
     private void checkDexChange(Dex originDex, Dex newDex) {
@@ -622,8 +836,8 @@ public class DexDiffDecoder extends BaseDecoder {
     /**
      * Construct dex meta-info and write it to meta file and log.
      *
-     * @param newOrFullPatchedFile
-     * New dex file or full patched dex file.
+     * @param newFile
+     * New dex file.
      * @param oldFile
      * Old dex file.
      * @param dexDiffFile
@@ -634,18 +848,20 @@ public class DexDiffDecoder extends BaseDecoder {
      * Md5 of output dex in dvm environment, could be small patched dex md5 or new dex.
      * @param dexDiffMd5
      * Md5 of dex patch info file.
+     * @param newOrFullPatchedCrc
+     * CRC32 of new dex or full patched dex.
      *
      * @throws IOException
      */
-    protected void logToDexMeta(File newOrFullPatchedFile, File oldFile, File dexDiffFile, String destMd5InDvm, String destMd5InArt, String dexDiffMd5) throws IOException {
+    protected void logToDexMeta(File newFile, File oldFile, File dexDiffFile, String destMd5InDvm, String destMd5InArt, String dexDiffMd5, long newOrFullPatchedCrc) {
         if (metaWriter == null && logWriter == null) {
             return;
         }
-        String parentRelative = getParentRelativePathStringToNewFile(newOrFullPatchedFile);
-        String relative = getRelativePathStringToNewFile(newOrFullPatchedFile);
+        String parentRelative = getParentRelativePathStringToNewFile(newFile);
+        String relative = getRelativePathStringToNewFile(newFile);
 
         if (metaWriter != null) {
-            String fileName = newOrFullPatchedFile.getName();
+            String fileName = newFile.getName();
             String dexMode = "jar";
             if (config.mDexRaw) {
                 dexMode = "raw";
@@ -665,7 +881,8 @@ public class DexDiffDecoder extends BaseDecoder {
                 }
             }
 
-            String meta = fileName + "," + parentRelative + "," + destMd5InDvm + "," + destMd5InArt + "," + dexDiffMd5 + "," + oldCrc + "," + dexMode;
+            String meta = fileName + "," + parentRelative + "," + destMd5InDvm + ","
+                + destMd5InArt + "," + dexDiffMd5 + "," + oldCrc + "," + newOrFullPatchedCrc + "," + dexMode;
 
             Logger.d("DexDecoder:write meta file data: %s", meta);
             metaWriter.writeLineToInfoFile(meta);
@@ -673,7 +890,7 @@ public class DexDiffDecoder extends BaseDecoder {
 
         if (logWriter != null) {
             String log = relative + ", oldSize=" + FileOperation.getFileSizes(oldFile) + ", newSize="
-                + FileOperation.getFileSizes(newOrFullPatchedFile) + ", diffSize=" + FileOperation.getFileSizes(dexDiffFile);
+                + FileOperation.getFileSizes(newFile) + ", diffSize=" + FileOperation.getFileSizes(dexDiffFile);
 
             logWriter.writeLineToInfoFile(log);
         }
@@ -746,9 +963,16 @@ public class DexDiffDecoder extends BaseDecoder {
         /**
          * This field could be one of the following value:
          *  fullPatchedDex md5, if old dex and new dex are different;
-         *  newDex md5, if new dex is marked to be copied directly;
+         *  newDex md5, if new dex is marked to be copied directly.
          */
         String newOrFullPatchedMd5 = "0";
+        /**
+         * This field is used to generate class-N dex jar on app runtime.
+         * It could be one of the following value:
+         *  CRC32 of full patched dex, if old dex and new dex are different;
+         *  CRC32 of new dex, if new dex is marked to be copied directly.
+         */
+        long newOrFullPatchedCRC = 0;
     }
 
     private final class DexPatcherLoggerBridge implements IDexPatcherLogger {

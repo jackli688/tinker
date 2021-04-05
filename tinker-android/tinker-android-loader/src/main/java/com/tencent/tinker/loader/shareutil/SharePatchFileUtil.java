@@ -16,9 +16,12 @@
 
 package com.tencent.tinker.loader.shareutil;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
-import android.util.Log;
+import android.os.Build;
+
+import com.tencent.tinker.loader.TinkerRuntimeException;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -39,6 +42,8 @@ import java.util.zip.ZipFile;
 public class SharePatchFileUtil {
     private static final String TAG = "Tinker.PatchFileUtil";
 
+    private static char[] hexDigits = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+
     /**
      * data dir, such as /data/data/tinker.sample.android/tinker
      * @param context
@@ -50,8 +55,9 @@ public class SharePatchFileUtil {
             // Looks like running on a test Context, so just return without patching.
             return null;
         }
-
-        return new File(applicationInfo.dataDir, ShareConstants.PATCH_DIRECTORY_NAME);
+        final String dirName = ("oppo".equalsIgnoreCase(Build.MANUFACTURER) && Build.VERSION.SDK_INT == 22)
+                ? ShareConstants.PATCH_DIRECTORY_NAME_SPEC : ShareConstants.PATCH_DIRECTORY_NAME;
+        return new File(applicationInfo.dataDir, dirName);
     }
 
     public static File getPatchTempDirectory(Context context) {
@@ -118,7 +124,7 @@ public class SharePatchFileUtil {
                 buffer.append("\n");
             }
         } catch (Exception e) {
-            Log.e(TAG, "checkTinkerLastUncaughtCrash exception: " + e);
+            ShareTinkerLog.e(TAG, "checkTinkerLastUncaughtCrash exception: " + e);
             return null;
         } finally {
             closeQuietly(in);
@@ -128,8 +134,62 @@ public class SharePatchFileUtil {
 
     }
 
+    /**
+     * Closes the given {@code obj}. Suppresses any exceptions.
+     */
+    @SuppressLint("NewApi")
+    public static void closeQuietly(Object obj) {
+        if (obj == null) return;
+        if (obj instanceof Closeable) {
+            try {
+                ((Closeable) obj).close();
+            } catch (Throwable ignored) {
+                // Ignored.
+            }
+        } else if (Build.VERSION.SDK_INT >= 19 && obj instanceof AutoCloseable) {
+            try {
+                ((AutoCloseable) obj).close();
+            } catch (Throwable ignored) {
+                // Ignored.
+            }
+        } else if (obj instanceof ZipFile) {
+            try {
+                ((ZipFile) obj).close();
+            } catch (Throwable ignored) {
+                // Ignored.
+            }
+        } else {
+            throw new IllegalArgumentException("obj: " + obj + " cannot be closed.");
+        }
+    }
+
     public static final boolean isLegalFile(File file) {
         return file != null && file.exists() && file.canRead() && file.isFile() && file.length() > 0;
+    }
+
+    /**
+     * For some special device whose dex2oat procedure is optimized for tinker. (e.g. vivo, oppo)
+     *
+     * Because these devices by-pass our dex2oat request, which cause vm to load tinker's dex with interpret-mode
+     * and generate nothing instead of a valid oat file. It's fine to skip the check so far.
+     *
+     * @param file
+     * @return
+     */
+    public static final boolean shouldAcceptEvenIfIllegal(File file) {
+        final boolean isSpecialManufacturer =
+                "vivo".equalsIgnoreCase(Build.MANUFACTURER)
+             || "oppo".equalsIgnoreCase(Build.MANUFACTURER)
+             || "meizu".equalsIgnoreCase(Build.MANUFACTURER);
+
+        final boolean isSpecialOSVer =
+                (Build.VERSION.SDK_INT >= 29)
+             || (Build.VERSION.SDK_INT >= 28 && Build.VERSION.PREVIEW_SDK_INT != 0)
+             || (ShareTinkerInternals.isArkHotRuning());
+
+        final boolean isFileIllegal = !file.exists() || file.length() == 0;
+
+        return (isSpecialManufacturer || isSpecialOSVer) && isFileIllegal;
     }
 
     /**
@@ -164,12 +224,12 @@ public class SharePatchFileUtil {
             return true;
         }
 
-        Log.i(TAG, "safeDeleteFile, try to delete path: " + file.getPath());
-
         if (file.exists()) {
+            ShareTinkerLog.i(TAG, "safeDeleteFile, try to delete path: " + file.getPath());
+
             boolean deleted = file.delete();
             if (!deleted) {
-                Log.e(TAG, "Failed to delete file, try to delete when exit. path: " + file.getPath());
+                ShareTinkerLog.e(TAG, "Failed to delete file, try to delete when exit. path: " + file.getPath());
                 file.deleteOnExit();
             }
             return deleted;
@@ -232,11 +292,15 @@ public class SharePatchFileUtil {
      * dex may wrap with jar
      */
     public static boolean verifyDexFileMd5(File file, String md5) {
-        if (file == null || md5 == null) {
+        return verifyDexFileMd5(file, ShareConstants.DEX_IN_JAR, md5);
+    }
+
+    public static boolean verifyDexFileMd5(File file, String entryName, String md5) {
+        if (file == null || md5 == null || entryName == null) {
             return false;
         }
         //if it is not the raw dex, we check the stream instead
-        String fileMd5;
+        String fileMd5 = "";
 
         if (isRawDexFile(file.getName())) {
             fileMd5 = getMD5(file);
@@ -244,26 +308,26 @@ public class SharePatchFileUtil {
             ZipFile dexJar = null;
             try {
                 dexJar = new ZipFile(file);
-                ZipEntry classesDex = dexJar.getEntry(ShareConstants.DEX_IN_JAR);
+                ZipEntry classesDex = dexJar.getEntry(entryName);
                 // no code
                 if (null == classesDex) {
-                    Log.e(TAG, "There's no entry named: " + ShareConstants.DEX_IN_JAR + " in " + file.getAbsolutePath());
+                    ShareTinkerLog.e(TAG, "There's no entry named: " + ShareConstants.DEX_IN_JAR + " in " + file.getAbsolutePath());
                     return false;
                 }
-                fileMd5 = getMD5(dexJar.getInputStream(classesDex));
+                InputStream is = null;
+                try {
+                    is = dexJar.getInputStream(classesDex);
+                    fileMd5 = getMD5(is);
+                } catch (Throwable e) {
+                    ShareTinkerLog.e(TAG, "exception occurred when get md5: " + file.getAbsolutePath(), e);
+                } finally {
+                    closeQuietly(is);
+                }
             } catch (Throwable e) {
-                Log.e(TAG, "Bad dex jar file: " + file.getAbsolutePath(), e);
+                ShareTinkerLog.e(TAG, "Bad dex jar file: " + file.getAbsolutePath(), e);
                 return false;
             } finally {
-                // Bugfix: some device redefined ZipFile, which is not implemented closeable.
-                // SharePatchFileUtil.closeZip(dexJar);
-                if (dexJar != null) {
-                    try {
-                        dexJar.close();
-                    } catch (Throwable thr) {
-                        // Ignored.
-                    }
-                }
+                closeZip(dexJar);
             }
         }
 
@@ -353,6 +417,25 @@ public class SharePatchFileUtil {
         }
     }
 
+    public static String getMD5(byte[] buffer) {
+        try {
+            MessageDigest mdTemp = MessageDigest.getInstance("MD5");
+            mdTemp.update(buffer);
+            byte[] md = mdTemp.digest();
+            int j = md.length;
+            char[] str = new char[j * 2];
+            int k = 0;
+            for (int i = 0; i < j; i++) {
+                byte byte0 = md[i];
+                str[k++] = hexDigits[byte0 >>> 4 & 0xf];
+                str[k++] = hexDigits[byte0 & 0xf];
+            }
+            return new String(str);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     /**
      * Get the md5 for the file. call getMD5(FileInputStream is, int bufLen) inside.
      *
@@ -369,6 +452,7 @@ public class SharePatchFileUtil {
             String md5 = getMD5(fin);
             return md5;
         } catch (Exception e) {
+            ShareTinkerLog.e(TAG, e.getMessage());
             return null;
         } finally {
             closeQuietly(fin);
@@ -377,12 +461,36 @@ public class SharePatchFileUtil {
 
     /**
      * change the jar file path as the makeDexElements do
+     * Android O change its path
      *
      * @param path
      * @param optimizedDirectory
      * @return
      */
     public static String optimizedPathFor(File path, File optimizedDirectory) {
+        if (ShareTinkerInternals.isAfterAndroidO()) {
+            // dex_location = /foo/bar/baz.jar
+            // odex_location = /foo/bar/oat/<isa>/baz.odex
+
+            String currentInstructionSet;
+            try {
+                currentInstructionSet = ShareTinkerInternals.getCurrentInstructionSet();
+            } catch (Exception e) {
+                throw new TinkerRuntimeException("getCurrentInstructionSet fail:", e);
+            }
+
+            File parentFile = path.getParentFile();
+            String fileName = path.getName();
+            int index = fileName.lastIndexOf('.');
+            if (index > 0) {
+                fileName = fileName.substring(0, index);
+            }
+
+            String result = parentFile.getAbsolutePath() + "/oat/"
+                + currentInstructionSet + "/" + fileName + ShareConstants.ODEX_SUFFIX;
+            return result;
+        }
+
         String fileName = path.getName();
         if (!fileName.endsWith(ShareConstants.DEX_SUFFIX)) {
             int lastDot = fileName.lastIndexOf(".");
@@ -400,26 +508,13 @@ public class SharePatchFileUtil {
         return result.getPath();
     }
 
-    /**
-     * Closes the given {@code Closeable}. Suppresses any IO exceptions.
-     */
-    public static void closeQuietly(Closeable closeable) {
-        try {
-            if (closeable != null) {
-                closeable.close();
-            }
-        } catch (IOException e) {
-            Log.w(TAG, "Failed to close resource", e);
-        }
-    }
-
     public static void closeZip(ZipFile zipFile) {
         try {
             if (zipFile != null) {
                 zipFile.close();
             }
         } catch (IOException e) {
-            Log.w(TAG, "Failed to close resource", e);
+            ShareTinkerLog.w(TAG, "Failed to close resource", e);
         }
     }
 
@@ -429,7 +524,7 @@ public class SharePatchFileUtil {
             resourceZip = new ZipFile(resOutput);
             ZipEntry arscEntry = resourceZip.getEntry(ShareConstants.RES_ARSC);
             if (arscEntry == null) {
-                Log.i(TAG, "checkResourceArscMd5 resources.arsc not found");
+                ShareTinkerLog.i(TAG, "checkResourceArscMd5 resources.arsc not found");
                 return false;
             }
             InputStream inputStream = null;
@@ -440,11 +535,11 @@ public class SharePatchFileUtil {
                     return true;
                 }
             } finally {
-                SharePatchFileUtil.closeQuietly(inputStream);
+                closeQuietly(inputStream);
             }
 
         } catch (Throwable e) {
-            Log.i(TAG, "checkResourceArscMd5 throwable:" + e.getMessage());
+            ShareTinkerLog.i(TAG, "checkResourceArscMd5 throwable:" + e.getMessage());
 
         } finally {
             SharePatchFileUtil.closeZip(resourceZip);

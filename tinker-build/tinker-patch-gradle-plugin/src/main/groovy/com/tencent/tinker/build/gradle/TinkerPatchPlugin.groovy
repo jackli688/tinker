@@ -16,6 +16,7 @@
 
 package com.tencent.tinker.build.gradle
 
+import com.android.build.gradle.api.ApkVariant
 import com.tencent.tinker.build.gradle.extension.*
 import com.tencent.tinker.build.gradle.task.*
 import com.tencent.tinker.build.util.FileOperation
@@ -25,6 +26,11 @@ import org.gradle.api.GradleException
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.Task
+import org.gradle.api.file.FileCollection
+import org.jetbrains.annotations.NotNull
+import sun.misc.Unsafe
+
+import java.lang.reflect.Field
 
 /**
  * Registers the plugin's tasks.
@@ -33,161 +39,227 @@ import org.gradle.api.Task
  */
 
 class TinkerPatchPlugin implements Plugin<Project> {
-    public static final String TINKER_INTERMEDIATES = "build/intermediates/tinker_intermediates/"
+    public static final String ISSUE_URL = "https://github.com/Tencent/tinker/issues"
+
+    private Project mProject = null
 
     @Override
     public void apply(Project project) {
+        mProject = project
+
         //osdetector change its plugin name in 1.4.0
         try {
-            project.apply plugin: 'osdetector'
+            mProject.apply plugin: 'osdetector'
         } catch (Throwable e) {
-            project.apply plugin: 'com.google.osdetector'
+            mProject.apply plugin: 'com.google.osdetector'
         }
 
-        project.extensions.create('tinkerPatch', TinkerPatchExtension)
+        mProject.extensions.create('tinkerPatch', TinkerPatchExtension)
 
-        project.tinkerPatch.extensions.create('buildConfig', TinkerBuildConfigExtension, project)
+        mProject.tinkerPatch.extensions.create('buildConfig', TinkerBuildConfigExtension, mProject)
 
-        project.tinkerPatch.extensions.create('dex', TinkerDexExtension, project)
-        project.tinkerPatch.extensions.create('lib', TinkerLibExtension)
-        project.tinkerPatch.extensions.create('res', TinkerResourceExtension)
-        project.tinkerPatch.extensions.create('packageConfig', TinkerPackageConfigExtension, project)
-        project.tinkerPatch.extensions.create('sevenZip', TinkerSevenZipExtension, project)
+        mProject.tinkerPatch.extensions.create('dex', TinkerDexExtension, mProject)
+        mProject.tinkerPatch.extensions.create('lib', TinkerLibExtension)
+        mProject.tinkerPatch.extensions.create('res', TinkerResourceExtension)
+        mProject.tinkerPatch.extensions.create("arkHot", TinkerArkHotExtension)
+        mProject.tinkerPatch.extensions.create('packageConfig', TinkerPackageConfigExtension, mProject)
+        mProject.tinkerPatch.extensions.create('sevenZip', TinkerSevenZipExtension, mProject)
 
-        if (!project.plugins.hasPlugin('com.android.application')) {
+        if (!mProject.plugins.hasPlugin('com.android.application')) {
             throw new GradleException('generateTinkerApk: Android Application plugin required')
         }
 
-        def android = project.extensions.android
+        def android = mProject.extensions.android
 
-        //open jumboMode
-        android.dexOptions.jumboMode = true
-
-        //close preDexLibraries
         try {
+            //close preDexLibraries
             android.dexOptions.preDexLibraries = false
+
+            //open jumboMode
+            android.dexOptions.jumboMode = true
+
+            //disable dex archive mode
+            disableArchiveDex()
+            //禁止打了运行时注解的类全部打到主dex中
+            android.dexOptions.keepRuntimeAnnotatedClasses = false
         } catch (Throwable e) {
             //no preDexLibraries field, just continue
         }
 
-        project.afterEvaluate {
-            def configuration = project.tinkerPatch
+        mProject.afterEvaluate {
+            def configuration = mProject.tinkerPatch
 
             if (!configuration.tinkerEnable) {
-                project.logger.error("tinker tasks are disabled.")
+                mProject.logger.error("tinker tasks are disabled.")
                 return
             }
 
-            project.logger.error("----------------------tinker build warning ------------------------------------")
-            project.logger.error("tinker auto operation: ")
-            project.logger.error("excluding annotation processor and source template from app packaging. Enable dx jumboMode to reduce package size.")
-            project.logger.error("enable dx jumboMode to reduce package size.")
-            project.logger.error("disable preDexLibraries to prevent ClassDefNotFoundException when your app is booting.")
-            project.logger.error("")
-            project.logger.error("tinker will change your build configs:")
-            project.logger.error("we will add TINKER_ID=${configuration.buildConfig.tinkerId} in your build output manifest file build/intermediates/manifests/full/*")
-            project.logger.error("")
-            project.logger.error("if minifyEnabled is true")
+            mProject.logger.error("----------------------tinker build warning ------------------------------------")
+            mProject.logger.error("tinker auto operation: ")
+            mProject.logger.error("excluding annotation processor and source template from app packaging. Enable dx jumboMode to reduce package size.")
+            mProject.logger.error("enable dx jumboMode to reduce package size.")
+            mProject.logger.error("disable preDexLibraries to prevent ClassDefNotFoundException when your app is booting.")
+            mProject.logger.error("disable archive dex mode so far for keeping dex apply.")
+            mProject.logger.error("")
+            mProject.logger.error("tinker will change your build configs:")
+            mProject.logger.error("we will add TINKER_ID=${configuration.buildConfig.tinkerId} in your build output manifest file ${project.buildDir}/intermediates/manifests/full/*")
+            mProject.logger.error("")
+            mProject.logger.error("if minifyEnabled is true")
 
             String tempMappingPath = configuration.buildConfig.applyMapping
 
             if (FileOperation.isLegalFile(tempMappingPath)) {
-                project.logger.error("we will build ${project.getName()} apk with apply mapping file ${tempMappingPath}")
+                mProject.logger.error("we will build ${mProject.getName()} apk with apply mapping file ${tempMappingPath}")
             }
 
-            project.logger.error("you will find the gen proguard rule file at ${TinkerProguardConfigTask.PROGUARD_CONFIG_PATH}")
-            project.logger.error("and we will help you to put it in the proguardFiles.")
-            project.logger.error("")
-            project.logger.error("if multiDexEnabled is true")
-            project.logger.error("you will find the gen multiDexKeepProguard file at ${TinkerMultidexConfigTask.MULTIDEX_CONFIG_PATH}")
-            project.logger.error("and we will help you to put it in the MultiDexKeepProguardFile.")
-            project.logger.error("")
-            project.logger.error("if applyResourceMapping file is exist")
+            mProject.logger.error("you will find the gen proguard rule file at ${TinkerBuildPath.getProguardConfigPath(project)}")
+            mProject.logger.error("and we will help you to put it in the proguardFiles.")
+            mProject.logger.error("")
+            mProject.logger.error("if multiDexEnabled is true")
+            mProject.logger.error("you will find the gen multiDexKeepProguard file at ${TinkerBuildPath.getMultidexConfigPath(project)}")
+            mProject.logger.error("and we will help you to put it in the MultiDexKeepProguardFile.")
+            mProject.logger.error("")
+            mProject.logger.error("if applyResourceMapping file is exist")
             String tempResourceMappingPath = configuration.buildConfig.applyResourceMapping
             if (FileOperation.isLegalFile(tempResourceMappingPath)) {
-                project.logger.error("we will build ${project.getName()} apk with resource R.txt ${tempResourceMappingPath} file")
+                mProject.logger.error("we will build ${mProject.getName()} apk with resource R.txt ${tempResourceMappingPath} file")
             } else {
-                project.logger.error("we will build ${project.getName()} apk with resource R.txt file")
+                mProject.logger.error("we will build ${mProject.getName()} apk with resource R.txt file")
             }
-            project.logger.error("if resources.arsc has changed, you should use applyResource mode to build the new apk!")
-            project.logger.error("-----------------------------------------------------------------")
+            mProject.logger.error("if resources.arsc has changed, you should use applyResource mode to build the new apk!")
+            mProject.logger.error("-----------------------------------------------------------------")
 
-            android.applicationVariants.all { variant ->
+            TinkerResourceIdTask.injectStableIdsFileOnDemand(mProject)
 
-                def variantOutput = variant.outputs.first()
-                def variantName = variant.name.capitalize()
+            android.applicationVariants.all { ApkVariant variant ->
+                def variantName = variant.name
+                def capitalizedVariantName = variantName.capitalize()
 
-                def instantRunTask = getInstantRunTask(project, variantName)
+                def instantRunTask = getInstantRunTask(variantName)
                 if (instantRunTask != null) {
                     throw new GradleException(
                             "Tinker does not support instant run mode, please trigger build"
-                                    + " by assemble${variantName} or disable instant run"
+                                    + " by assemble${capitalizedVariantName} or disable instant run"
                                     + " in 'File->Settings...'."
                     )
                 }
 
-                TinkerPatchSchemaTask tinkerPatchBuildTask = project.tasks.create("tinkerPatch${variantName}", TinkerPatchSchemaTask)
-
-                tinkerPatchBuildTask.signConfig = variant.apkVariantData.variantConfiguration.signingConfig
-
-                variant.outputs.each { output ->
-                    setPatchNewApkPath(configuration, output, variant, tinkerPatchBuildTask)
-                    setPatchOutputFolder(configuration, output, variant, tinkerPatchBuildTask)
-                }
+                TinkerPatchSchemaTask tinkerPatchBuildTask = mProject.tasks.create("tinkerPatch${capitalizedVariantName}", TinkerPatchSchemaTask)
+                tinkerPatchBuildTask.signConfig = variant.signingConfig
 
                 // Create a task to add a build TINKER_ID to AndroidManifest.xml
                 // This task must be called after "process${variantName}Manifest", since it
                 // requires that an AndroidManifest.xml exists in `build/intermediates`.
-                TinkerManifestTask manifestTask = project.tasks.create("tinkerProcess${variantName}Manifest", TinkerManifestTask)
-                manifestTask.manifestPath = variantOutput.processManifest.manifestOutputFile
-                manifestTask.mustRunAfter variantOutput.processManifest
+                def agpProcessManifestTask = Compatibilities.getProcessManifestTask(project, variant)
+                def tinkerManifestTask = mProject.tasks.create("tinkerProcess${capitalizedVariantName}Manifest", TinkerManifestTask)
+                tinkerManifestTask.mustRunAfter agpProcessManifestTask
 
-                variantOutput.processResources.dependsOn manifestTask
+                variant.outputs.each { variantOutput ->
+                    setPatchNewApkPath(configuration, variantOutput, variant, tinkerPatchBuildTask)
+                    setPatchOutputFolder(configuration, variantOutput, variant, tinkerPatchBuildTask)
+
+                    def outputName = variantOutput.dirName
+                    if (outputName.endsWith("/")) {
+                        outputName = outputName.substring(0, outputName.length() - 1)
+                    }
+                    if (tinkerManifestTask.outputNameToManifestMap.containsKey(outputName)) {
+                        throw new GradleException("Duplicate tinker manifest output name: '${outputName}'")
+                    }
+                    def manifestPath = Compatibilities.getOutputManifestPath(project, agpProcessManifestTask, variantOutput)
+                    tinkerManifestTask.outputNameToManifestMap.put(outputName, manifestPath)
+                }
+
+                def agpProcessResourcesTask = Compatibilities.getProcessResourcesTask(project, variant)
+                agpProcessResourcesTask.dependsOn tinkerManifestTask
 
                 //resource id
-                TinkerResourceIdTask applyResourceTask = project.tasks.create("tinkerProcess${variantName}ResourceId", TinkerResourceIdTask)
-                applyResourceTask.resDir = variantOutput.processResources.resDir
-                //let applyResourceTask run after manifestTask
-                applyResourceTask.mustRunAfter manifestTask
+                TinkerResourceIdTask applyResourceTask = mProject.tasks.create("tinkerProcess${capitalizedVariantName}ResourceId", TinkerResourceIdTask)
+                applyResourceTask.variant = variant
+                applyResourceTask.applicationId = Compatibilities.getApplicationId(project, variant)
+                applyResourceTask.resDir = Compatibilities.getInputResourcesDirectory(project, agpProcessResourcesTask)
 
-                variantOutput.processResources.dependsOn applyResourceTask
+                //let applyResourceTask run after manifestTask
+                applyResourceTask.mustRunAfter tinkerManifestTask
+                agpProcessResourcesTask.dependsOn applyResourceTask
+
+                // Fix issue-866.
+                // We found some case that applyResourceTask run after mergeResourcesTask, it caused 'applyResourceMapping' config not work.
+                // The task need merged resources to calculate ids.xml, it must depends on merge resources task.
+                def agpMergeResourcesTask = Compatibilities.getMergeResourcesTask(project, variant)
+                applyResourceTask.dependsOn agpMergeResourcesTask
+
+                if (tinkerManifestTask.outputNameToManifestMap == null
+                        || tinkerManifestTask.outputNameToManifestMap.isEmpty()) {
+                    throw new GradleException("tinkerManifestTask.manifestPath is null.")
+                }
+
+                if (applyResourceTask.resDir == null) {
+                    throw new GradleException("applyResourceTask.resDir is null.")
+                }
 
                 // Add this proguard settings file to the list
                 boolean proguardEnable = variant.getBuildType().buildType.minifyEnabled
 
                 if (proguardEnable) {
-                    TinkerProguardConfigTask proguardConfigTask = project.tasks.create("tinkerProcess${variantName}Proguard", TinkerProguardConfigTask)
+                    TinkerProguardConfigTask proguardConfigTask = mProject.tasks.create("tinkerProcess${capitalizedVariantName}Proguard", TinkerProguardConfigTask)
                     proguardConfigTask.applicationVariant = variant
-                    proguardConfigTask.mustRunAfter manifestTask
+                    proguardConfigTask.mustRunAfter tinkerManifestTask
 
-                    def proguardTask = getProguardTask(project, variantName)
-                    if (proguardTask != null) {
-                        proguardTask.dependsOn proguardConfigTask
-                    }
-
+                    def obfuscateTask = getObfuscateTask(variantName)
+                    obfuscateTask.dependsOn proguardConfigTask
                 }
 
                 // Add this multidex proguard settings file to the list
-                boolean multiDexEnabled = variant.apkVariantData.variantConfiguration.isMultiDexEnabled()
+                boolean multiDexEnabled = variant.mergedFlavor.multiDexEnabled
 
                 if (multiDexEnabled) {
-                    TinkerMultidexConfigTask multidexConfigTask = project.tasks.create("tinkerProcess${variantName}MultidexKeep", TinkerMultidexConfigTask)
+                    TinkerMultidexConfigTask multidexConfigTask = mProject.tasks.create("tinkerProcess${capitalizedVariantName}MultidexKeep", TinkerMultidexConfigTask)
                     multidexConfigTask.applicationVariant = variant
-                    multidexConfigTask.mustRunAfter manifestTask
+                    multidexConfigTask.multiDexKeepProguard = getManifestMultiDexKeepProguard(variant)
+                    multidexConfigTask.mustRunAfter tinkerManifestTask
 
-                    def multidexTask = getMultiDexTask(project, variantName)
-                    if (multidexTask != null) {
-                        multidexTask.dependsOn multidexConfigTask
+                    // for java.io.FileNotFoundException: app/build/intermediates/multi-dex/release/manifest_keep.txt
+                    // for gradle 3.x gen manifest_keep move to processResources task
+                    multidexConfigTask.mustRunAfter agpProcessResourcesTask
+
+                    def agpMultidexTask = getMultiDexTask(variantName)
+                    def agpR8Task = getR8Task(variantName)
+                    if (agpMultidexTask != null) {
+                        agpMultidexTask.dependsOn multidexConfigTask
+                    } else if (agpMultidexTask == null && agpR8Task != null) {
+                        agpR8Task.dependsOn multidexConfigTask
+                        try {
+                            Object r8Transform = agpR8Task.getTransform()
+                            //R8 maybe forget to add multidex keep proguard file in agp 3.4.0, it's a agp bug!
+                            //If we don't do it, some classes will not keep in maindex such as loader's classes.
+                            //So tinker will not remove loader's classes, it will crashed in dalvik and will check TinkerTestDexLoad.isPatch failed in art.
+                            if (r8Transform.metaClass.hasProperty(r8Transform, "mainDexRulesFiles")) {
+                                File manifestMultiDexKeepProguard = getManifestMultiDexKeepProguard(variant)
+                                if (manifestMultiDexKeepProguard != null) {
+                                    //see difference between mainDexRulesFiles and mainDexListFiles in https://developer.android.com/studio/build/multidex?hl=zh-cn
+                                    FileCollection originalFiles = r8Transform.metaClass.getProperty(r8Transform, 'mainDexRulesFiles')
+                                    if (!originalFiles.contains(manifestMultiDexKeepProguard)) {
+                                        FileCollection replacedFiles = mProject.files(originalFiles, manifestMultiDexKeepProguard)
+                                        mProject.logger.error("R8Transform original mainDexRulesFiles: ${originalFiles.files}")
+                                        mProject.logger.error("R8Transform replaced mainDexRulesFiles: ${replacedFiles.files}")
+                                        //it's final, use reflect to replace it.
+                                        replaceKotlinFinalField("com.android.build.gradle.internal.transforms.R8Transform", "mainDexRulesFiles", r8Transform, replacedFiles)
+                                    }
+                                }
+                            }
+                        } catch (Exception ignore) {
+                            //Maybe it's not a transform task after agp 3.6.0 so try catch it.
+                        }
                     }
-                    def collectMultiDexComponentsTask = getCollectMultiDexComponentsTask(project, variantName)
+                    def collectMultiDexComponentsTask = getCollectMultiDexComponentsTask(variantName)
                     if (collectMultiDexComponentsTask != null) {
                         multidexConfigTask.mustRunAfter collectMultiDexComponentsTask
                     }
                 }
 
                 if (configuration.buildConfig.keepDexApply
-                    && FileOperation.isLegalFile(project.tinkerPatch.oldApk)) {
-                    com.tencent.tinker.build.gradle.transform.ImmutableDexTransform.inject(project, variant)
+                        && FileOperation.isLegalFile(mProject.tinkerPatch.oldApk)) {
+                    com.tencent.tinker.build.gradle.transform.ImmutableDexTransform.inject(mProject, variant)
                 }
             }
         }
@@ -213,6 +285,24 @@ class TinkerPatchPlugin implements Plugin<Project> {
         tinkerPatchBuildTask.outputFolder = outputFolder
     }
 
+    void disableArchiveDex() {
+        try {
+            def booleanOptClazz = Class.forName('com.android.build.gradle.options.BooleanOption')
+            def enableDexArchiveField = booleanOptClazz.getDeclaredField('ENABLE_DEX_ARCHIVE')
+            enableDexArchiveField.setAccessible(true)
+            def enableDexArchiveEnumObj = enableDexArchiveField.get(null)
+            def defValField = enableDexArchiveEnumObj.getClass().getDeclaredField('defaultValue')
+            defValField.setAccessible(true)
+            defValField.set(enableDexArchiveEnumObj, false)
+        } catch (Throwable thr) {
+            // To some extends, class not found means we are in lower version of android gradle
+            // plugin, so just ignore that exception.
+            if (!(thr instanceof ClassNotFoundException)) {
+                mProject.logger.error("reflectDexArchiveFlag error: ${thr.getMessage()}.")
+            }
+        }
+    }
+
     /**
      * Specify the new apk path. If the new apk file is specified by {@code tinkerPatch.buildConfig.newApk},
      * just use it as the new apk input for tinker patch, otherwise use the assemble output.
@@ -224,36 +314,178 @@ class TinkerPatchPlugin implements Plugin<Project> {
      * @param tinkerPatchBuildTask the task that tinker patch uses
      */
     void setPatchNewApkPath(configuration, output, variant, tinkerPatchBuildTask) {
-        def newApkPath = configuration.newApk;
+        def newApkPath = configuration.newApk
         if (!Utils.isNullOrNil(newApkPath)) {
-            if (FileOperation.isLegalFile(newApkPath)) {
+            if (FileOperation.isLegalFileOrDirectory(newApkPath)) {
                 tinkerPatchBuildTask.buildApkPath = newApkPath
                 return
             }
         }
 
         tinkerPatchBuildTask.buildApkPath = output.outputFile
-        tinkerPatchBuildTask.dependsOn variant.assemble
+
+        tinkerPatchBuildTask.dependsOn Compatibilities.getAssembleTask(mProject, variant)
     }
 
-    Task getMultiDexTask(Project project, String variantName) {
-        String multiDexTaskName = "transformClassesWithMultidexlistFor${variantName}"
-        return project.tasks.findByName(multiDexTaskName)
+    Task getMultiDexTask(String variantName) {
+        String multiDexTaskName = "multiDexList${variantName.capitalize()}"
+        String multiDexTaskTransformName = "transformClassesWithMultidexlistFor${variantName.capitalize()}"
+
+        def multiDexTask = mProject.tasks.findByName(multiDexTaskName)
+        if (multiDexTask == null) {
+            multiDexTask = mProject.tasks.findByName(multiDexTaskTransformName)
+        }
+
+        return multiDexTask
     }
 
-    Task getProguardTask(Project project, String variantName) {
-        String proguardTaskName = "transformClassesAndResourcesWithProguardFor${variantName}"
-        return project.tasks.findByName(proguardTaskName)
+    Task getR8Task(String variantName) {
+        String r8TransformTaskName = "transformClassesAndResourcesWithR8For${variantName.capitalize()}"
+        def r8TransformTask = mProject.tasks.findByName(r8TransformTaskName)
+        if (r8TransformTask != null) {
+            return r8TransformTask
+        }
+
+        String r8TaskName = "minify${variantName.capitalize()}WithR8"
+        def r8Task = mProject.tasks.findByName(r8TaskName)
+        if (r8Task != null) {
+            return r8Task
+        }
     }
 
-    Task getInstantRunTask(Project project, String variantName) {
-        String instantRunTask = "transformClassesWithInstantRunFor${variantName}"
-        return project.tasks.findByName(instantRunTask)
+
+    @NotNull
+    Task getObfuscateTask(String variantName) {
+        String proguardTransformTaskName = "transformClassesAndResourcesWithProguardFor${variantName.capitalize()}"
+        def proguardTransformTask = mProject.tasks.findByName(proguardTransformTaskName)
+        if (proguardTransformTask != null) {
+            return proguardTransformTask
+        }
+
+        String r8TransformTaskName = "transformClassesAndResourcesWithR8For${variantName.capitalize()}"
+        def r8TransformTask = mProject.tasks.findByName(r8TransformTaskName)
+        if (r8TransformTask != null) {
+            return r8TransformTask
+        }
+
+        String r8TaskName = "minify${variantName.capitalize()}WithR8"
+        def r8Task = mProject.tasks.findByName(r8TaskName)
+        if (r8Task != null) {
+            return r8Task
+        }
+
+        String proguardTaskName = "minify${variantName.capitalize()}WithProguard"
+        def proguardTask = mProject.tasks.findByName(proguardTaskName)
+        if (proguardTask != null) {
+            return proguardTask
+        }
+
+        // in case that Google changes the task name in later versions
+        throw new GradleException(String.format("The minifyEnabled is enabled for '%s', but " +
+                "tinker cannot find the task. Please submit issue to us: %s", variantName, ISSUE_URL))
     }
 
-    Task getCollectMultiDexComponentsTask(Project project, String variantName) {
-        String collectMultiDexComponents = "collect${variantName}MultiDexComponents"
-        return project.tasks.findByName(collectMultiDexComponents)
+    Task getInstantRunTask(String variantName) {
+        String instantRunTask = "transformClassesWithInstantRunFor${variantName.capitalize()}"
+        return mProject.tasks.findByName(instantRunTask)
     }
 
+    Task getCollectMultiDexComponentsTask(String variantName) {
+        String collectMultiDexComponents = "collect${variantName.capitalize()}MultiDexComponents"
+        return mProject.tasks.findByName(collectMultiDexComponents)
+    }
+
+    void replaceKotlinFinalField(String className, String filedName, Object instance, Object fieldValue) {
+        Field field = Class.forName(className).getDeclaredField(filedName)
+        final Field unsafeField = Unsafe.class.getDeclaredField("theUnsafe")
+        unsafeField.setAccessible(true)
+        final Unsafe unsafe = (Unsafe) unsafeField.get(null)
+        final long fieldOffset = unsafe.objectFieldOffset(field)
+        unsafe.putObject(instance, fieldOffset, fieldValue)
+    }
+
+    File getManifestMultiDexKeepProguard(def applicationVariant) {
+        File multiDexKeepProguard = null
+
+        try {
+            def file = applicationVariant.variantData.artifacts.get(
+                    Class.forName('com.android.build.gradle.internal.scope.InternalArtifactType$LEGACY_MULTIDEX_AAPT_DERIVED_PROGUARD_RULES')
+                            .getDeclaredField("INSTANCE")
+                            .get(null)
+            ).getOrNull()?.getAsFile()
+            if (file != null && file.getName() != '__EMPTY_DIR__') {
+                multiDexKeepProguard = file
+            }
+        } catch (Throwable ignore) {
+            // Ignored.
+        }
+
+        if (multiDexKeepProguard == null) {
+            try {
+                //for kotlin
+                def file = applicationVariant.getVariantData().getScope().getArtifacts().getFinalProduct(
+                        Class.forName('com.android.build.gradle.internal.scope.InternalArtifactType$LEGACY_MULTIDEX_AAPT_DERIVED_PROGUARD_RULES')
+                                .getDeclaredField("INSTANCE")
+                                .get(null)
+                ).getOrNull()?.getAsFile()
+                if (file != null && file.getName() != '__EMPTY_DIR__') {
+                    multiDexKeepProguard = file
+                }
+            } catch (Throwable ignore) {
+                // Ignored.
+            }
+        }
+
+        if (multiDexKeepProguard == null) {
+            try {
+                File file = applicationVariant.getVariantData().getScope().getArtifacts().getFinalProduct(
+                        Class.forName("com.android.build.gradle.internal.scope.InternalArtifactType")
+                                .getDeclaredField("LEGACY_MULTIDEX_AAPT_DERIVED_PROGUARD_RULES")
+                                .get(null)
+                ).getOrNull()?.getAsFile()
+                if (file != null && file.getName() != '__EMPTY_DIR__') {
+                    multiDexKeepProguard = file
+                }
+            } catch (Throwable ignore) {
+                // Ignored.
+            }
+        }
+
+        if (multiDexKeepProguard == null) {
+            try {
+                def buildableArtifact = applicationVariant.getVariantData().getScope().getArtifacts().getFinalArtifactFiles(
+                        Class.forName("com.android.build.gradle.internal.scope.InternalArtifactType")
+                                .getDeclaredField("LEGACY_MULTIDEX_AAPT_DERIVED_PROGUARD_RULES")
+                                .get(null)
+                )
+
+                //noinspection GroovyUncheckedAssignmentOfMemberOfRawType,UnnecessaryQualifiedReference
+                multiDexKeepProguard = com.google.common.collect.Iterators.getOnlyElement(buildableArtifact.iterator())
+            } catch (Throwable ignore) {
+
+            }
+        }
+
+        if (multiDexKeepProguard == null) {
+            try {
+                multiDexKeepProguard = applicationVariant.getVariantData().getScope().getManifestKeepListProguardFile()
+            } catch (Throwable ignore) {
+
+            }
+        }
+
+        if (multiDexKeepProguard == null) {
+            try {
+                multiDexKeepProguard = applicationVariant.getVariantData().getScope().getManifestKeepListFile()
+            } catch (Throwable ignore) {
+
+            }
+        }
+
+        if (multiDexKeepProguard == null) {
+            mProject.logger.error("can't get multiDexKeepProguard file")
+        }
+
+        return multiDexKeepProguard
+    }
 }
